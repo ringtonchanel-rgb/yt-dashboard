@@ -1,19 +1,26 @@
-# app.py — версия с кликабельными названиями видео
+# app.py — кликабельные таблицы + клик по графику (через streamlit-plotly-events, если доступен)
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 from datetime import timedelta
 import re
-import html  # для безопасного текста в ссылках
+import html
 
-# ======== опционально: sklearn для кластеров (если нет — всё равно работает) ========
+# --- опционально: кластеризация (если стоит sklearn) ---
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.cluster import KMeans
     SKLEARN_OK = True
 except Exception:
     SKLEARN_OK = False
+
+# --- опционально: клик по точке/столбцу графика ---
+try:
+    from streamlit_plotly_events import plotly_events
+    PLOTLY_EVENTS_OK = True
+except Exception:
+    PLOTLY_EVENTS_OK = False
 
 # -------------------- Страница --------------------
 st.set_page_config(page_title="YouTube Dashboard 🚀", layout="wide")
@@ -106,7 +113,7 @@ def shorten(text: str, n: int = 40) -> str:
     t = str(text) if text is not None else ""
     return (t[:n]+"…") if len(t) > n else t
 
-# --- ДЕЛАЕМ КЛИКАБЕЛЬНУЮ КОЛОНКУ С НАЗВАНИЕМ ВИДЕО ---
+# --- кликабельные названия (HTML) ---
 def add_clickable_title_column(df: pd.DataFrame, title_col: str | None, id_col: str | None, new_col_name="Видео"):
     out = df.copy()
     if id_col is None or id_col not in out.columns:
@@ -120,7 +127,41 @@ def add_clickable_title_column(df: pd.DataFrame, title_col: str | None, id_col: 
     return out
 
 def render_html_table(df: pd.DataFrame, columns: list[str], escape: bool = False):
-    st.markdown(df[columns].to_html(index=False, escape=escape), unsafe_allow_html=True)
+    # защита: показываем только реально существующие колонки
+    safe_cols = [c for c in columns if c in df.columns]
+    if not safe_cols:
+        st.info("Нет доступных колонок для отображения.")
+        return
+    st.markdown(df[safe_cols].to_html(index=False, escape=escape), unsafe_allow_html=True)
+
+# --- график с поддержкой клика (если доступен streamlit-plotly-events) ---
+def plot_bar_clickable(df: pd.DataFrame, x: str, y: str, id_col: str | None, title_col: str | None):
+    fig = px.bar(df, x=x, y=y, text=y)
+
+    # customdata для передачи ссылки
+    if id_col and id_col in df.columns:
+        urls = "https://www.youtube.com/watch?v=" + df[id_col].astype(str)
+        fig.update_traces(customdata=np.stack([urls], axis=-1))
+        # hovertext со ссылкой
+        fig.update_traces(hovertemplate="<b>%{x}</b><br>"+y+": %{y}<br>URL: %{customdata[0]}<extra></extra>")
+
+    fig.update_traces(textposition="outside")
+    fig.update_layout(xaxis_tickangle=-35, height=460, margin=dict(l=10, r=10, t=30, b=10))
+
+    if PLOTLY_EVENTS_OK:
+        # Ловим клик по столбику
+        selected = plotly_events(fig, click_event=True, hover_event=False, select_event=False, override_height=460, override_width="100%")
+        st.plotly_chart(fig, use_container_width=True)
+        if selected and id_col in df.columns:
+            point_index = selected[0].get("pointIndex")
+            if point_index is not None and 0 <= point_index < len(df):
+                vid = df.iloc[point_index][id_col]
+                url = f"https://www.youtube.com/watch?v={vid}"
+                st.link_button("🔗 Открыть выбранное видео", url, use_container_width=True)
+    else:
+        st.plotly_chart(fig, use_container_width=True)
+        if id_col and id_col in df.columns:
+            st.caption("Подсказка: установи пакет `streamlit-plotly-events`, чтобы открывать видео кликом по столбику. Сейчас URL виден в ховере.")
 
 # -------------------- Загрузка данных ---------------------
 if file_main:
@@ -141,39 +182,35 @@ if file_main:
     wth_col     = C["watch_time_hours"]
     pub_col     = C["publish_time"]
 
+    # даты + сортировка
     if pub_col:
         df[pub_col] = pd.to_datetime(df[pub_col], errors="coerce")
         df = df.sort_values(pub_col, ascending=False)
 
-    if dur_col:
-        df["__duration_sec__"] = df[dur_col].apply(parse_duration_to_seconds)
-    else:
-        df["__duration_sec__"] = np.nan
-    if avd_col:
-        df["__avd_sec__"] = df[avd_col].apply(parse_duration_to_seconds)
-    else:
-        df["__avd_sec__"] = np.nan
+    # длительность/AVD в секунды
+    df["__duration_sec__"] = df[dur_col].apply(parse_duration_to_seconds) if dur_col else np.nan
+    df["__avd_sec__"] = df[avd_col].apply(parse_duration_to_seconds) if avd_col else np.nan
 
+    # производные
     if (rpm_col is None) and (rev_col and views_col):
         df["__RPM__"] = df[rev_col] / df[views_col].replace(0, np.nan) * 1000.0
     else:
         df["__RPM__"] = df[rpm_col] if rpm_col else np.nan
 
-    if (imp_col and views_col):
-        df["__efficiency__"] = df[views_col] / df[imp_col].replace(0, np.nan)
-    else:
-        df["__efficiency__"] = np.nan
-
-    if (df["__avd_sec__"].notna().any() and df["__duration_sec__"].notna().any()):
-        df["__avg_percent_viewed__"] = (df["__avd_sec__"] / df["__duration_sec__"].replace(0, np.nan) * 100.0)
+    df["__efficiency__"] = df[views_col] / df[imp_col].replace(0, np.nan) if (imp_col and views_col) else np.nan
+    if df["__avd_sec__"].notna().any() and df["__duration_sec__"].notna().any():
+        df["__avg_percent_viewed__"] = df["__avd_sec__"] / df["__duration_sec__"].replace(0, np.nan) * 100.0
     else:
         df["__avg_percent_viewed__"] = np.nan
 
+    # ограничение по N
     df = df.head(n_videos).copy()
 
+    # ссылки
     if id_col:
         df["YouTube Link"] = df[id_col].apply(lambda x: f"https://www.youtube.com/watch?v={x}")
 
+    # ось X
     if title_col:
         df["__title_short__"] = df[title_col].apply(lambda x: shorten(x, 38))
         x_axis = "__title_short__"
@@ -207,12 +244,10 @@ if file_main:
             low5 = df.sort_values(base_metric, ascending=True).head(5)
             c1, c2 = st.columns(2)
 
-            # --- КЛИКАБЕЛЬНАЯ ТАБЛИЦА TOP-5 ---
             top5_click = add_clickable_title_column(top5, title_col, id_col, new_col_name="Видео")
             cols_top = ["Видео"] + [c for c in [id_col, base_metric, "YouTube Link"] if (c in top5_click.columns) or (c == "YouTube Link")]
             c1.write("**ТОП-5**"); render_html_table(top5_click, cols_top, escape=False)
 
-            # --- КЛИКАБЕЛЬНАЯ ТАБЛИЦА UNDER-5 ---
             low5_click = add_clickable_title_column(low5, title_col, id_col, new_col_name="Видео")
             cols_low = ["Видео"] + [c for c in [id_col, base_metric, "YouTube Link"] if (c in low5_click.columns) or (c == "YouTube Link")]
             c2.write("**Андер-5**"); render_html_table(low5_click, cols_low, escape=False)
@@ -221,12 +256,9 @@ if file_main:
 
         if x_axis and views_col:
             st.markdown("### Просмотры по видео")
-            fig = px.bar(df, x=x_axis, y=views_col, text=views_col)
-            fig.update_traces(textposition="outside")
-            fig.update_layout(xaxis_tickangle=-35, height=460, margin=dict(l=10, r=10, t=30, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            plot_bar_clickable(df, x=x_axis, y=views_col, id_col=id_col, title_col=title_col)
 
-    # -------- Content (фильтры, таблица, темы) --------
+    # -------- Content --------
     with tab_content:
         st.subheader("Таблица контента + фильтры")
         view_df = df.copy()
@@ -241,10 +273,7 @@ if file_main:
         else:
             view_df = view_df[(view_df["__duration_sec__"].isna()) | ((view_df["__duration_sec__"] >= min_dur) & (view_df["__duration_sec__"] <= max_dur))]
 
-        # --- КЛИКАБЕЛЬНАЯ ПЕРВАЯ КОЛОНКА "Видео" ---
         view_df_click = add_clickable_title_column(view_df, title_col, id_col, new_col_name="Видео")
-
-        # какие показывать
         base_cols = [id_col, views_col, imp_col, ctr_col, subs_col, rev_col, "__RPM__", "__avd_sec__", "__duration_sec__", "__avg_percent_viewed__", "__efficiency__", "YouTube Link"]
         show_cols = ["Видео"] + [c for c in base_cols if (c in view_df_click.columns) or (c == "YouTube Link")]
 
@@ -274,20 +303,20 @@ if file_main:
         else:
             st.info("Для кластеров установи scikit-learn (или загрузи без кластеризации).")
 
-    # -------- CTR & Thumbnails --------
+    # -------- CTR --------
     with tab_ctr:
         st.subheader("CTR & Thumbnails")
         if ctr_col and imp_col:
             fig = px.scatter(df, x=imp_col, y=ctr_col, size=views_col if views_col else None,
                              color=title_col if title_col else id_col, hover_data=[id_col] if id_col else None)
+            # добавим ссылку в hover
+            if id_col and id_col in df.columns:
+                urls = "https://www.youtube.com/watch?v=" + df[id_col].astype(str)
+                fig.update_traces(customdata=np.stack([urls], axis=-1),
+                                  hovertemplate="<b>%{y}% CTR</b><br>Impr: %{x}<br>URL: %{customdata[0]}<extra></extra>")
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Нет колонок CTR/Impressions для сравнения.")
-        if ctr_col and views_col and x_axis:
-            fig = px.bar(df, x=x_axis, y=ctr_col, text=ctr_col, hover_data=[views_col] if views_col else None)
-            fig.update_traces(textposition="outside")
-            fig.update_layout(xaxis_tickangle=-35, height=420)
-            st.plotly_chart(fig, use_container_width=True)
 
     # -------- Retention --------
     with tab_ret:
@@ -296,11 +325,19 @@ if file_main:
             c1, c2 = st.columns(2)
             fig = px.scatter(df, x="__duration_sec__", y="__avd_sec__", color=title_col if title_col else id_col,
                              hover_data=[id_col] if id_col else None)
+            if id_col and id_col in df.columns:
+                urls = "https://www.youtube.com/watch?v=" + df[id_col].astype(str)
+                fig.update_traces(customdata=np.stack([urls], axis=-1),
+                                  hovertemplate="Dur: %{x}s<br>AVD: %{y}s<br>URL: %{customdata[0]}<extra></extra>")
             fig.update_layout(height=420)
             c1.plotly_chart(fig, use_container_width=True)
 
             fig2 = px.scatter(df, x="__duration_sec__", y="__avg_percent_viewed__", color=title_col if title_col else id_col,
                               hover_data=[id_col] if id_col else None)
+            if id_col and id_col in df.columns:
+                urls = "https://www.youtube.com/watch?v=" + df[id_col].astype(str)
+                fig2.update_traces(customdata=np.stack([urls], axis=-1),
+                                   hovertemplate="Dur: %{x}s<br>Avg %: %{y:.1f}%<br>URL: %{customdata[0]}<extra></extra>")
             fig2.update_layout(height=420)
             c2.plotly_chart(fig2, use_container_width=True)
         else:
@@ -310,8 +347,7 @@ if file_main:
     with tab_traffic:
         st.subheader("Traffic & SEO")
         if file_queries is not None:
-            qdf = pd.read_csv(file_queries)
-            qdf.columns = [c.strip() for c in qdf.columns]
+            qdf = pd.read_csv(file_queries); qdf.columns = [c.strip() for c in qdf.columns]
             q_query = find_col(qdf, ["query", "запрос"])
             q_views = find_col(qdf, ["views", "просмотры"])
             q_impr  = find_col(qdf, ["impressions", "показы"])
@@ -327,17 +363,11 @@ if file_main:
     with tab_money:
         st.subheader("Monetization")
         if rev_col and x_axis:
-            fig = px.bar(df, x=x_axis, y=rev_col, text=rev_col)
-            fig.update_traces(textposition="outside")
-            fig.update_layout(xaxis_tickangle=-35, height=420)
-            st.plotly_chart(fig, use_container_width=True)
+            plot_bar_clickable(df, x=x_axis, y=rev_col, id_col=id_col, title_col=title_col)
         else:
             st.info("Нет Revenue или оси X.")
         if df["__RPM__"].notna().any() and x_axis:
-            fig = px.bar(df, x=x_axis, y="__RPM__", text="__RPM__")
-            fig.update_traces(textposition="outside")
-            fig.update_layout(xaxis_tickangle=-35, height=420)
-            st.plotly_chart(fig, use_container_width=True)
+            plot_bar_clickable(df, x=x_axis, y="__RPM__", id_col=id_col, title_col=title_col)
         else:
             st.info("Нет RPM (или рассчитать не удалось).")
 
@@ -400,4 +430,3 @@ if file_main:
 
 else:
     st.info("👆 Загрузите основной CSV из YouTube Studio, а затем исследуйте вкладки.")
-
