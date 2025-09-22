@@ -58,7 +58,7 @@ if uploaded_file:
                     return col
         return None
 
-    # Таблица
+    # --- Таблица ---
     st.subheader("📋 Таблица всех метрик")
     base_cols = [c for c in [title_col, id_col, "YouTube Link"] if c]
     metric_cols = []
@@ -67,10 +67,15 @@ if uploaded_file:
         if col_name:
             metric_cols.append(col_name)
 
-    if base_cols + metric_cols:
-        st.dataframe(df[base_cols + metric_cols])
+    # берём только реально существующие колонки
+    available_cols = [c for c in base_cols + metric_cols if c in df.columns or c == "YouTube Link"]
 
-    # Графики для выбранных метрик
+    if available_cols:
+        st.dataframe(df[available_cols])
+    else:
+        st.warning("❌ Не найдено ни одной колонки для отображения. Проверьте названия метрик.")
+
+    # --- Графики ---
     for metric in selected_metrics:
         col_name = find_col(metrics_options[metric])
         if col_name:
@@ -86,15 +91,17 @@ if uploaded_file:
             fig.update_layout(xaxis_tickangle=-45, height=500)
             st.plotly_chart(fig, use_container_width=True)
 
-    # ТОП-5
+    # --- ТОП-5 ---
     if show_top and selected_metrics:
         st.subheader("🏆 ТОП-5 видео по выбранным метрикам")
         col_name = find_col(metrics_options[selected_metrics[0]])
         if col_name:
             top5 = df.sort_values(col_name, ascending=False).head(5)
-            st.table(top5[[title_col, col_name, "YouTube Link"]] if title_col else top5[[id_col, col_name, "YouTube Link"]])
+            cols_to_show = [title_col or id_col, col_name, "YouTube Link"]
+            cols_to_show = [c for c in cols_to_show if c in df.columns or c == "YouTube Link"]
+            st.table(top5[cols_to_show])
 
-    # Scatter
+    # --- Scatter ---
     if show_scatter and len(selected_metrics) >= 2:
         st.subheader("🔗 Сравнение метрик (Scatter)")
         col_x = find_col(metrics_options[selected_metrics[0]])
