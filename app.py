@@ -2,110 +2,79 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# --- Конфигурация страницы ---
+# ---------- НАСТРОЙКИ ----------
 st.set_page_config(page_title="YouTube Dashboard 🚀", layout="wide")
 
-# --- Заголовок ---
-st.markdown(
-    """
-    <h1 style="display: flex; align-items: center;">
-        📊 YouTube Dashboard 🚀
-    </h1>
-    <p>Аналитика YouTube-канала: просмотры, CTR, удержание и другие ключевые метрики</p>
-    """,
-    unsafe_allow_html=True
-)
-
-# --- Боковое меню настроек ---
 st.sidebar.header("⚙️ Настройки")
 uploaded_file = st.sidebar.file_uploader("Загрузите CSV из YouTube Studio", type=["csv"])
-n = st.sidebar.slider("Сколько последних видео показывать:", 3, 20, 7)
+num_videos = st.sidebar.slider("Сколько последних видео показывать:", 3, 30, 7)
 
-# Чекбоксы для выбора метрик
-show_views = st.sidebar.checkbox("👁️ Просмотры", value=True)
-show_ctr = st.sidebar.checkbox("📈 CTR", value=False)
-show_avd = st.sidebar.checkbox("⏱️ AVD (средняя продолжительность просмотра)", value=False)
-show_duration = st.sidebar.checkbox("🕒 Длительность видео", value=False)
-show_table = st.sidebar.checkbox("📊 Таблица всех метрик", value=True)
+# Метрики для отображения
+metrics_options = {
+    "👁️ Просмотры": "Views",
+    "📈 CTR": "Impressions click-through rate",
+    "⏱️ AVD (средняя продолжительность просмотра)": "Average view duration",
+    "🎬 Длительность видео": "Duration",
+    "📊 Подписчики": "Subscribers",
+    "💰 Доход": "Estimated partner revenue"
+}
+selected_metrics = st.sidebar.multiselect("Выберите метрики:", list(metrics_options.keys()), default=["👁️ Просмотры"])
 
-# --- Если файл загружен ---
+# ---------- ОСНОВНОЙ КОНТЕНТ ----------
+st.markdown("<h1 style='text-align: center;'>📊 YouTube Dashboard 🚀</h1>", unsafe_allow_html=True)
+st.write("Аналитика YouTube-канала: просмотры, CTR, удержание, доход и другие ключевые метрики.")
+
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
 
-    # убираем строку "Итоговое значение", если есть
-    if "Название видео" in df.columns:
-        df = df[df["Название видео"].notna()]
+    # Попробуем угадать основные колонки (под разные CSV)
+    rename_map = {
+        "Video ID": "Video ID",
+        "External Video ID": "Video ID",
+        "Название видео": "Title",
+        "Video title": "Title",
+        "Название": "Title",
+        "Impressions click-through rate": "Impressions click-through rate",
+        "CTR": "Impressions click-through rate",
+        "Average view duration": "Average view duration",
+        "Average Percentage Viewed": "Average Percentage Viewed",
+        "Views": "Views",
+        "Estimated partner revenue": "Estimated partner revenue",
+        "Subscribers": "Subscribers",
+        "Duration": "Duration"
+    }
+    df = df.rename(columns=rename_map)
 
-    # сортировка по дате публикации (если есть)
-    if "Время публикации видео" in df.columns:
-        df["Время публикации видео"] = pd.to_datetime(df["Время публикации видео"], errors="coerce")
-        df = df.sort_values("Время публикации видео", ascending=False)
+    # Оставляем только последние N видео
+    if "Video publish time" in df.columns:
+        df = df.sort_values("Video publish time", ascending=False)
+    df = df.head(num_videos)
 
-    # оставляем только последние N видео
-    df = df.head(n).copy()
+    # Создаем кликабельные ссылки
+    if "Video ID" in df.columns:
+        df["YouTube Link"] = df["Video ID"].apply(lambda x: f"[🔗 Открыть](https://www.youtube.com/watch?v={x})")
 
-    # делаем сокращённые названия для графиков
-    df["Название (сокр.)"] = df["Название видео"].apply(
-        lambda x: x[:40] + "..." if len(str(x)) > 40 else x
-    )
+    # ---- ВИЗУАЛИЗАЦИЯ ----
+    st.subheader("📋 Таблица всех метрик")
+    st.dataframe(df[["Title", "Video ID", "YouTube Link"] + list(metrics_options.values()) if "Title" in df.columns else df])
 
-    # --- Метрики ---
-    if show_views and "Просмотры" in df.columns:
-        st.subheader("👁️ Просмотры по видео")
-        fig = px.bar(
-            df,
-            x="Название (сокр.)",
-            y="Просмотры",
-            text="Просмотры",
-            hover_data={"Название видео": True, "Просмотры": True},
-        )
-        fig.update_traces(textposition="outside")
-        fig.update_layout(xaxis_tickangle=-30, height=500)
-        st.plotly_chart(fig, use_container_width=True)
+    # ---- ГРАФИКИ ----
+    if selected_metrics:
+        st.subheader("📊 Визуализация выбранных метрик")
+        for metric in selected_metrics:
+            col = metrics_options[metric]
+            if col in df.columns:
+                fig = px.line(
+                    df,
+                    x="Title",
+                    y=col,
+                    markers=True,
+                    text=col,
+                    title=f"{metric} по видео"
+                )
+                fig.update_traces(textposition="top center")
+                fig.update_layout(xaxis_tickangle=-30)
+                st.plotly_chart(fig, use_container_width=True)
 
-    if show_ctr and "CTR для значков видео (%)" in df.columns:
-        st.subheader("📈 CTR по видео")
-        fig = px.bar(
-            df,
-            x="Название (сокр.)",
-            y="CTR для значков видео (%)",
-            text="CTR для значков видео (%)",
-            hover_data={"Название видео": True},
-        )
-        fig.update_traces(textposition="outside")
-        fig.update_layout(xaxis_tickangle=-30, height=500)
-        st.plotly_chart(fig, use_container_width=True)
-
-    if show_avd and "Средняя продолжительность просмотра" in df.columns:
-        st.subheader("⏱️ Средняя продолжительность просмотра")
-        fig = px.bar(
-            df,
-            x="Название (сокр.)",
-            y="Средняя продолжительность просмотра",
-            text="Средняя продолжительность просмотра",
-            hover_data={"Название видео": True},
-        )
-        fig.update_traces(textposition="outside")
-        fig.update_layout(xaxis_tickangle=-30, height=500)
-        st.plotly_chart(fig, use_container_width=True)
-
-    if show_duration and "Расчётная длительность (секунды)" in df.columns:
-        st.subheader("🕒 Длительность видео (секунды)")
-        fig = px.bar(
-            df,
-            x="Название (сокр.)",
-            y="Расчётная длительность (секунды)",
-            text="Расчётная длительность (секунды)",
-            hover_data={"Название видео": True},
-        )
-        fig.update_traces(textposition="outside")
-        fig.update_layout(xaxis_tickangle=-30, height=500)
-        st.plotly_chart(fig, use_container_width=True)
-
-    if show_table:
-        st.subheader("📊 Таблица всех метрик")
-        st.dataframe(df, use_container_width=True)
-
-# --- Если файл не загружен ---
 else:
     st.info("👆 Загрузите CSV-файл, чтобы увидеть аналитику")
