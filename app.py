@@ -4,7 +4,7 @@ import plotly.express as px
 
 st.set_page_config(page_title="YouTube Dashboard", layout="wide")
 
-st.title("📊 YouTube Analytics Dashboard")
+st.title("YouTube Dashboard 🚀 [TEST]")
 
 # Загрузка CSV
 uploaded_file = st.file_uploader("Загрузите CSV из YouTube Studio", type=["csv"])
