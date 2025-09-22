@@ -1,12 +1,13 @@
-# app.py
+# app.py — версия с кликабельными названиями видео
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 from datetime import timedelta
 import re
+import html  # для безопасного текста в ссылках
 
-# ======== Безопасный импорт sklearn (не обязателен) ========
+# ======== опционально: sklearn для кластеров (если нет — всё равно работает) ========
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.cluster import KMeans
@@ -25,7 +26,7 @@ file_main = st.sidebar.file_uploader("Загрузите основной CSV и
 file_queries = st.sidebar.file_uploader("(Опционально) CSV с поисковыми запросами / vidIQ", type=["csv"])
 n_videos = st.sidebar.slider("Сколько последних видео показывать:", 3, 200, 30)
 
-st.sidebar.header("🎛 Фильтры (на вкладке Content)")
+st.sidebar.header("🎛 Фильтры (вкладка Content)")
 search_q = st.sidebar.text_input("Поиск по названию/ID")
 min_dur = st.sidebar.number_input("Мин. длительность (сек)", 0, 24*3600, 0)
 max_dur = st.sidebar.number_input("Макс. длительность (сек)", 0, 24*3600, 24*3600)
@@ -59,13 +60,11 @@ def find_col(df: pd.DataFrame, keys) -> str | None:
         return None
     if isinstance(keys, str):
         keys = [keys]
-    # точное совпадение (приведённое к lower)
     cols_norm = {norm(c): c for c in df.columns}
     for k in keys:
         nk = norm(k)
         if nk in cols_norm:
             return cols_norm[nk]
-    # contains
     for k in keys:
         nk = norm(k)
         for c in df.columns:
@@ -74,11 +73,9 @@ def find_col(df: pd.DataFrame, keys) -> str | None:
     return None
 
 def detect_cols(df: pd.DataFrame):
-    cols = {k: find_col(df, v) for k, v in METRICS_MAP.items()}
-    return cols
+    return {k: find_col(df, v) for k, v in METRICS_MAP.items()}
 
 def parse_duration_to_seconds(x):
-    """Поддержка 'MM:SS', 'HH:MM:SS' либо чисел/строк с секундами."""
     if pd.isna(x):
         return np.nan
     s = str(x).strip()
@@ -109,6 +106,22 @@ def shorten(text: str, n: int = 40) -> str:
     t = str(text) if text is not None else ""
     return (t[:n]+"…") if len(t) > n else t
 
+# --- ДЕЛАЕМ КЛИКАБЕЛЬНУЮ КОЛОНКУ С НАЗВАНИЕМ ВИДЕО ---
+def add_clickable_title_column(df: pd.DataFrame, title_col: str | None, id_col: str | None, new_col_name="Видео"):
+    out = df.copy()
+    if id_col is None or id_col not in out.columns:
+        return out
+    titles = out[title_col] if (title_col and title_col in out.columns) else out[id_col].astype(str)
+    urls = "https://www.youtube.com/watch?v=" + out[id_col].astype(str)
+    out[new_col_name] = [
+        f"<a href='{u}' target='_blank'>{html.escape(str(t))}</a>"
+        for t, u in zip(titles, urls)
+    ]
+    return out
+
+def render_html_table(df: pd.DataFrame, columns: list[str], escape: bool = False):
+    st.markdown(df[columns].to_html(index=False, escape=escape), unsafe_allow_html=True)
+
 # -------------------- Загрузка данных ---------------------
 if file_main:
     df = pd.read_csv(file_main)
@@ -128,12 +141,10 @@ if file_main:
     wth_col     = C["watch_time_hours"]
     pub_col     = C["publish_time"]
 
-    # Приводим дату публикации и сортируем
     if pub_col:
         df[pub_col] = pd.to_datetime(df[pub_col], errors="coerce")
         df = df.sort_values(pub_col, ascending=False)
 
-    # Приведём длительность к сек, AVD тоже (если форматы как HH:MM:SS)
     if dur_col:
         df["__duration_sec__"] = df[dur_col].apply(parse_duration_to_seconds)
     else:
@@ -143,14 +154,13 @@ if file_main:
     else:
         df["__avd_sec__"] = np.nan
 
-    # Производные метрики
     if (rpm_col is None) and (rev_col and views_col):
         df["__RPM__"] = df[rev_col] / df[views_col].replace(0, np.nan) * 1000.0
     else:
         df["__RPM__"] = df[rpm_col] if rpm_col else np.nan
 
     if (imp_col and views_col):
-        df["__efficiency__"] = df[views_col] / df[imp_col].replace(0, np.nan)  # Views / Impressions
+        df["__efficiency__"] = df[views_col] / df[imp_col].replace(0, np.nan)
     else:
         df["__efficiency__"] = np.nan
 
@@ -159,14 +169,11 @@ if file_main:
     else:
         df["__avg_percent_viewed__"] = np.nan
 
-    # ограничение по количеству видео
     df = df.head(n_videos).copy()
 
-    # Кликабельные ссылки
     if id_col:
         df["YouTube Link"] = df[id_col].apply(lambda x: f"https://www.youtube.com/watch?v={x}")
 
-    # Короткое имя для оси X
     if title_col:
         df["__title_short__"] = df[title_col].apply(lambda x: shorten(x, 38))
         x_axis = "__title_short__"
@@ -190,7 +197,6 @@ if file_main:
         if wth_col:   cols[1].metric("Watch time (h)", f"{df[wth_col].sum():,.1f}")
         if subs_col:  cols[2].metric("Subs", f"{df[subs_col].sum():,.0f}")
         if rev_col:   cols[3].metric("Revenue ($)", f"{df[rev_col].sum():,.2f}")
-        # средние
         if df["__RPM__"].notna().any(): cols[4].metric("RPM", f"{df['__RPM__'].mean():,.2f}")
         if df["__avd_sec__"].notna().any(): cols[5].metric("Avg AVD", seconds_to_hhmmss(df['__avd_sec__'].mean()))
 
@@ -200,11 +206,16 @@ if file_main:
             top5 = df.sort_values(base_metric, ascending=False).head(5)
             low5 = df.sort_values(base_metric, ascending=True).head(5)
             c1, c2 = st.columns(2)
-            show_cols = [c for c in [title_col, id_col, base_metric, "YouTube Link"] if c in (df.columns.tolist()+['YouTube Link'])]
-            c1.write("**ТОП-5**")
-            c1.dataframe(top5[[c for c in show_cols if c in top5.columns or c == "YouTube Link"]], use_container_width=True)
-            c2.write("**Андер-5**")
-            c2.dataframe(low5[[c for c in show_cols if c in low5.columns or c == "YouTube Link"]], use_container_width=True)
+
+            # --- КЛИКАБЕЛЬНАЯ ТАБЛИЦА TOP-5 ---
+            top5_click = add_clickable_title_column(top5, title_col, id_col, new_col_name="Видео")
+            cols_top = ["Видео"] + [c for c in [id_col, base_metric, "YouTube Link"] if (c in top5_click.columns) or (c == "YouTube Link")]
+            c1.write("**ТОП-5**"); render_html_table(top5_click, cols_top, escape=False)
+
+            # --- КЛИКАБЕЛЬНАЯ ТАБЛИЦА UNDER-5 ---
+            low5_click = add_clickable_title_column(low5, title_col, id_col, new_col_name="Видео")
+            cols_low = ["Видео"] + [c for c in [id_col, base_metric, "YouTube Link"] if (c in low5_click.columns) or (c == "YouTube Link")]
+            c2.write("**Андер-5**"); render_html_table(low5_click, cols_low, escape=False)
         else:
             st.info("Нет базовой метрики для ТОП/Андер.")
 
@@ -219,7 +230,6 @@ if file_main:
     with tab_content:
         st.subheader("Таблица контента + фильтры")
         view_df = df.copy()
-        # фильтры
         if search_q:
             pool = [c for c in [title_col, id_col] if c]
             if pool:
@@ -231,19 +241,23 @@ if file_main:
         else:
             view_df = view_df[(view_df["__duration_sec__"].isna()) | ((view_df["__duration_sec__"] >= min_dur) & (view_df["__duration_sec__"] <= max_dur))]
 
-        show_cols = [c for c in [title_col, id_col, views_col, imp_col, ctr_col, subs_col, rev_col, "__RPM__", "__avd_sec__", "__duration_sec__", "__avg_percent_viewed__", "__efficiency__", "YouTube Link"] if (c in view_df.columns) or (c in ["YouTube Link"])]
-        # человекочитаемые колонки
+        # --- КЛИКАБЕЛЬНАЯ ПЕРВАЯ КОЛОНКА "Видео" ---
+        view_df_click = add_clickable_title_column(view_df, title_col, id_col, new_col_name="Видео")
+
+        # какие показывать
+        base_cols = [id_col, views_col, imp_col, ctr_col, subs_col, rev_col, "__RPM__", "__avd_sec__", "__duration_sec__", "__avg_percent_viewed__", "__efficiency__", "YouTube Link"]
+        show_cols = ["Видео"] + [c for c in base_cols if (c in view_df_click.columns) or (c == "YouTube Link")]
+
         human_names = {
             "__RPM__": "RPM",
             "__avd_sec__": "AVD (сек)",
             "__duration_sec__": "Длительность (сек)",
             "__avg_percent_viewed__": "Avg % viewed",
-            "__efficiency__": "Efficiency (Views/Impr.)"
+            "__efficiency__": "Efficiency (Views/Impr.)",
         }
-        df_print = view_df[show_cols].rename(columns=human_names)
-        st.dataframe(df_print, use_container_width=True)
+        df_print = view_df_click.rename(columns=human_names).copy()
+        render_html_table(df_print, show_cols, escape=False)
 
-        # Кластера тем (опционально)
         st.markdown("### Кластера тем (по названию)")
         if SKLEARN_OK and title_col:
             k = st.slider("Количество кластеров", 2, 12, 5)
@@ -258,7 +272,7 @@ if file_main:
             except Exception as e:
                 st.info(f"Кластеризация не удалась: {e}")
         else:
-            st.info("Для кластеров установи scikit-learn (или загрузка без кластеризации).")
+            st.info("Для кластеров установи scikit-learn (или загрузи без кластеризации).")
 
     # -------- CTR & Thumbnails --------
     with tab_ctr:
@@ -269,7 +283,6 @@ if file_main:
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Нет колонок CTR/Impressions для сравнения.")
-
         if ctr_col and views_col and x_axis:
             fig = px.bar(df, x=x_axis, y=ctr_col, text=ctr_col, hover_data=[views_col] if views_col else None)
             fig.update_traces(textposition="outside")
@@ -290,8 +303,6 @@ if file_main:
                               hover_data=[id_col] if id_col else None)
             fig2.update_layout(height=420)
             c2.plotly_chart(fig2, use_container_width=True)
-
-            st.caption("Левый график: длительность vs AVD (сек). Правый: длительность vs средний % досмотра.")
         else:
             st.info("Нет данных для AVD/Длительности (или не распознаны форматы).")
 
@@ -301,12 +312,9 @@ if file_main:
         if file_queries is not None:
             qdf = pd.read_csv(file_queries)
             qdf.columns = [c.strip() for c in qdf.columns]
-            # Пробуем найти названия
             q_query = find_col(qdf, ["query", "запрос"])
             q_views = find_col(qdf, ["views", "просмотры"])
             q_impr  = find_col(qdf, ["impressions", "показы"])
-
-            st.write("Данные из загрузки (queries/vidIQ):")
             show_q = [c for c in [q_query, q_views, q_impr] if c]
             if show_q:
                 st.dataframe(qdf[show_q].head(100), use_container_width=True)
@@ -314,8 +322,6 @@ if file_main:
                 st.info("Не распознаны колонки в queries-файле (ищу: Query/Views/Impressions).")
         else:
             st.info("Загрузи CSV с поисковыми запросами (или vidIQ), чтобы показать SEO-блок.")
-
-        st.markdown("**Идеи:** подключить YouTube Data API + Google Trends для генерации тем/ключей (можно добавить в следующую версию).")
 
     # -------- Monetization --------
     with tab_money:
@@ -327,7 +333,6 @@ if file_main:
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Нет Revenue или оси X.")
-
         if df["__RPM__"].notna().any() and x_axis:
             fig = px.bar(df, x=x_axis, y="__RPM__", text="__RPM__")
             fig.update_traces(textposition="outside")
@@ -355,11 +360,18 @@ if file_main:
         if "__duration_sec__" in df.columns:
             shorts = df[df["__duration_sec__"] < 60]
             longs  = df[df["__duration_sec__"] >= 60]
+
+            shorts_click = add_clickable_title_column(shorts, title_col, id_col, new_col_name="Видео")
+            longs_click  = add_clickable_title_column(longs,  title_col, id_col, new_col_name="Видео")
+
+            cols_short = ["Видео"] + [c for c in [id_col, views_col, ctr_col, "__avd_sec__", "__avg_percent_viewed__", "YouTube Link"]
+                                      if (c in shorts_click.columns) or (c == "YouTube Link")]
+            cols_long  = ["Видео"] + [c for c in [id_col, views_col, ctr_col, "__avd_sec__", "__avg_percent_viewed__", "YouTube Link"]
+                                      if (c in longs_click.columns) or (c == "YouTube Link")]
+
             c1, c2 = st.columns(2)
-            c1.write(f"**Shorts** ({len(shorts)} шт.)")
-            c1.dataframe(shorts[[c for c in [title_col, id_col, views_col, ctr_col, "__avd_sec__", "__avg_percent_viewed__", "YouTube Link"] if c in shorts.columns or c=='YouTube Link']], use_container_width=True)
-            c2.write(f"**Longs** ({len(longs)} шт.)")
-            c2.dataframe(longs[[c for c in [title_col, id_col, views_col, ctr_col, "__avd_sec__", "__avg_percent_viewed__", "YouTube Link"] if c in longs.columns or c=='YouTube Link']], use_container_width=True)
+            c1.write(f"**Shorts** ({len(shorts)} шт.)"); render_html_table(shorts_click, cols_short, escape=False)
+            c2.write(f"**Longs** ({len(longs)} шт.)");  render_html_table(longs_click,  cols_long,  escape=False)
         else:
             st.info("Нет длительности — нельзя разделить Shorts/Longs.")
 
@@ -378,10 +390,14 @@ if file_main:
 
         if issues:
             for title, d in issues:
+                issues_click = add_clickable_title_column(d, title_col, id_col, new_col_name="Видео")
+                cols_alerts = ["Видео"] + [c for c in [id_col, ctr_col, "__avd_sec__", "YouTube Link"]
+                                           if (c in issues_click.columns) or (c == "YouTube Link")]
                 st.write(f"**{title}: {len(d)} видео**")
-                st.dataframe(d[[c for c in [title_col, id_col, ctr_col, "__avd_sec__", "YouTube Link"] if c in d.columns or c=='YouTube Link']], use_container_width=True)
+                render_html_table(issues_click, cols_alerts, escape=False)
         else:
             st.success("Проблемных видео не найдено (по заданным порогам).")
 
 else:
     st.info("👆 Загрузите основной CSV из YouTube Studio, а затем исследуйте вкладки.")
+
