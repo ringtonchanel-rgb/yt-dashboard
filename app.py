@@ -1,6 +1,7 @@
 # app.py — YouTube Analytics Tools
-# Dashboard (управление группами) + Group Analytics (Year Mix)
-# Дедупликация отчётов только внутри одной группы. Разрешено использовать один и тот же CSV в разных группах.
+# Dashboard (группы + сохранение изменений) и Group Analytics (Year Mix)
+# Дедупликация CSV только внутри одной группы.
+# Один и тот же CSV можно использовать в разных группах.
 
 import streamlit as st
 import pandas as pd
@@ -70,7 +71,7 @@ def to_number(x):
     is_percent = s.endswith("%")
     if is_percent:
         s = s[:-1]
-    if "," in s and "." not in s:  # «1,23» -> «1.23»
+    if "," in s and "." not in s:
         s = s.replace(",", ".")
     try:
         return float(s)
@@ -110,11 +111,10 @@ def seconds_to_hhmmss(sec):
 # --------------------------- FILE LOADER ---------------------------
 def load_uploaded_file(uploaded_file):
     """
-    Надёжное чтение uploaded_file:
-    - читаем единым байтовым буфером;
-    - считаем md5-хэш;
-    - пробуем разные encodings для CSV;
-    - возвращаем мету + DataFrame.
+    Читаем файл стабильно:
+    - единым байтовым буфером (getvalue/read)
+    - md5-хэш
+    - пробы кодировок
     """
     raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
     h = hashlib.md5(raw).hexdigest()
@@ -138,7 +138,7 @@ if "groups" not in st.session_state:
     st.session_state["groups"] = []   # [{name: str, files: [{name, hash, df, meta}, ...]}]
 
 def all_hashes() -> set[str]:
-    """Хэши всех файлов всех групп (не используется для блокировки — только для информации)."""
+    """Все хэши по всем группам (для информации, не для блокировки)."""
     hs = set()
     for g in st.session_state["groups"]:
         for f in g["files"]:
@@ -146,7 +146,7 @@ def all_hashes() -> set[str]:
     return hs
 
 def group_hashes(idx: int) -> set[str]:
-    """Хэши файлов внутри конкретной группы (для локальной дедупликации)."""
+    """Хэши файлов внутри конкретной группы (локальная дедупликация)."""
     if 0 <= idx < len(st.session_state["groups"]):
         return {f["hash"] for f in st.session_state["groups"][idx]["files"]}
     return set()
@@ -222,21 +222,25 @@ if nav.endswith("Dashboard"):
         st.markdown("### Управление группами")
         for gi, g in enumerate(st.session_state["groups"]):
             with st.expander(f"Группа: {g['name']}", expanded=False):
-                # Переименование
+                # Поля редактирования
                 new_name = st.text_input("Название", value=g["name"], key=f"rename_{gi}")
-                if st.button("Сохранить название", key=f"save_name_{gi}"):
-                    g["name"] = new_name.strip() or g["name"]
-                    st.success("Название сохранено.")
-                    st.rerun()
+                add_more = st.file_uploader(
+                    "Добавить отчёты в эту группу",
+                    type=["csv"], accept_multiple_files=True, key=f"append_files_{gi}"
+                )
 
-                # Добавление файлов в группу
-                add_more = st.file_uploader("Добавить отчёты в эту группу", type=["csv"], accept_multiple_files=True, key=f"append_files_{gi}")
-                if st.button("Добавить отчёты", key=f"append_btn_{gi}"):
-                    if not add_more:
-                        st.warning("Выберите файлы.")
-                    else:
-                        # ДЕДУП ТОЛЬКО ВНУТРИ ТЕКУЩЕЙ ГРУППЫ
-                        known = group_hashes(gi)
+                # ЕДИНАЯ КНОПКА СОХРАНЕНИЯ
+                if st.button("Сохранить изменения", key=f"save_group_{gi}"):
+                    changed = False
+
+                    # Переименование
+                    if new_name.strip() and new_name.strip() != g["name"]:
+                        g["name"] = new_name.strip()
+                        changed = True
+
+                    # Добавление файлов
+                    if add_more:
+                        known = group_hashes(gi)  # дедуп внутри группы
                         added, skipped = 0, 0
                         for uf in add_more:
                             pack = load_uploaded_file(uf)
@@ -248,11 +252,14 @@ if nav.endswith("Dashboard"):
                             g["files"].append(pack)
                             known.add(pack["hash"])
                             added += 1
-                        if added:
+                        if added or skipped:
                             st.success(f"Добавлено файлов: {added}. Пропущено дублей (внутри группы): {skipped}.")
-                            st.rerun()
-                        else:
-                            st.info("Новых файлов не добавлено (дубликаты внутри группы или пустые).")
+                        changed = changed or bool(added)
+
+                    if changed:
+                        st.rerun()
+                    else:
+                        st.info("Изменений нет — нечего сохранять.")
 
                 # Список файлов + удаление
                 st.markdown("**Файлы группы:**")
@@ -368,7 +375,6 @@ else:
                 else:
                     new_name = st.sidebar.text_input("Название новой группы", value=f"GA Group {len(st.session_state['groups'])+1}")
                     if st.sidebar.button("Создать и сохранить"):
-                        # Дедуп только внутри создаваемой группы
                         known = set()
                         new_files = []
                         for uf in up_files:
