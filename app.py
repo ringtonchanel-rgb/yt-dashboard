@@ -297,11 +297,11 @@ if nav.endswith("Dashboard"):
                     if add_more:
                         added = 0
                         for uf in add_more:
-                            pack = load_uploaded_file(uf)
-                            if pack["df"] is None or pack["df"].empty":  # noqa
-                                continue
-                            g["files"].append(pack)   # дубликаты разрешены
-                            added += 1
+    pack = load_uploaded_file(uf)
+    if (pack["df"] is None) or (pack["df"].empty):
+        continue
+    g["files"].append(pack)   # дубликаты разрешены
+    added += 1
                         if added:
                             st.success(f"Добавлено файлов: {added}.")
                             changed = True
