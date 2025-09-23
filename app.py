@@ -1,7 +1,6 @@
 # app.py — YouTube Analytics Tools
 # Dashboard (группы + сохранение изменений) и Group Analytics (Year Mix)
-# Дедупликация CSV только внутри одной группы.
-# Один и тот же CSV можно использовать в разных группах.
+# Дубликаты CSV РАЗРЕШЕНЫ: можно добавлять один и тот же файл сколько угодно раз.
 
 import streamlit as st
 import pandas as pd
@@ -113,7 +112,7 @@ def load_uploaded_file(uploaded_file):
     """
     Читаем файл стабильно:
     - единым байтовым буфером (getvalue/read)
-    - md5-хэш
+    - md5-хэш (теперь лишь для информации, дубли разрешены)
     - пробы кодировок
     """
     raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
@@ -137,19 +136,14 @@ def load_uploaded_file(uploaded_file):
 if "groups" not in st.session_state:
     st.session_state["groups"] = []   # [{name: str, files: [{name, hash, df, meta}, ...]}]
 
-def all_hashes() -> set[str]:
-    """Все хэши по всем группам (для информации, не для блокировки)."""
-    hs = set()
-    for g in st.session_state["groups"]:
-        for f in g["files"]:
-            hs.add(f["hash"])
-    return hs
-
-def group_hashes(idx: int) -> set[str]:
-    """Хэши файлов внутри конкретной группы (локальная дедупликация)."""
-    if 0 <= idx < len(st.session_state["groups"]):
-        return {f["hash"] for f in st.session_state["groups"][idx]["files"]}
-    return set()
+def concat_groups(indices):
+    frames = []
+    for i in indices:
+        if 0 <= i < len(st.session_state["groups"]):
+            for f in st.session_state["groups"][i]["files"]:
+                if f["df"] is not None and not f["df"].empty:
+                    frames.append(f["df"])
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 def kpis_for_group(group):
     total_impr = 0.0
@@ -173,15 +167,6 @@ def kpis_for_group(group):
     avg_avd = float(np.nanmean(avd_vals)) if avd_vals else np.nan
     return dict(impressions=int(total_impr), views=int(total_views), ctr=avg_ctr, avd_sec=avg_avd)
 
-def concat_groups(indices):
-    frames = []
-    for i in indices:
-        if 0 <= i < len(st.session_state["groups"]):
-            for f in st.session_state["groups"][i]["files"]:
-                if f["df"] is not None and not f["df"].empty:
-                    frames.append(f["df"])
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
 # --------------------------- DASHBOARD ---------------------------
 if nav.endswith("Dashboard"):
     st.header("Dashboard")
@@ -196,24 +181,19 @@ if nav.endswith("Dashboard"):
             elif not files:
                 st.warning("Загрузите хотя бы один CSV.")
             else:
-                # ДЕДУП ТОЛЬКО ВНУТРИ СОЗДАВАЕМОЙ ГРУППЫ
-                known = set()
-                new_files, skipped = [], 0
+                new_files = []
                 for uf in files:
                     pack = load_uploaded_file(uf)
-                    if pack["hash"] in known:
-                        skipped += 1
-                        continue
                     if pack["df"] is None or pack["df"].empty:
                         continue
+                    # Дубликаты РАЗРЕШЕНЫ — просто добавляем всё
                     new_files.append(pack)
-                    known.add(pack["hash"])
                 if new_files:
                     st.session_state["groups"].append({"name": group_name.strip(), "files": new_files})
-                    st.success(f"Группа добавлена. Пропущено дублей (внутри новой группы): {skipped}.")
+                    st.success(f"Группа добавлена. Загружено файлов: {len(new_files)}.")
                     st.rerun()
                 else:
-                    st.error("Ни одного нового файла не добавлено (возможно, пустые/дубли внутри набора).")
+                    st.error("Не удалось добавить файлы (возможно пустые/повреждены).")
 
     if not st.session_state["groups"]:
         st.info("Добавьте хотя бы одну группу в сайдбаре.")
@@ -238,23 +218,18 @@ if nav.endswith("Dashboard"):
                         g["name"] = new_name.strip()
                         changed = True
 
-                    # Добавление файлов
+                    # Добавление файлов (дубликаты разрешены)
                     if add_more:
-                        known = group_hashes(gi)  # дедуп внутри группы
-                        added, skipped = 0, 0
+                        added = 0
                         for uf in add_more:
                             pack = load_uploaded_file(uf)
-                            if pack["hash"] in known:
-                                skipped += 1
-                                continue
                             if pack["df"] is None or pack["df"].empty:
                                 continue
                             g["files"].append(pack)
-                            known.add(pack["hash"])
                             added += 1
-                        if added or skipped:
-                            st.success(f"Добавлено файлов: {added}. Пропущено дублей (внутри группы): {skipped}.")
-                        changed = changed or bool(added)
+                        if added:
+                            st.success(f"Добавлено файлов: {added}.")
+                            changed = True
 
                     if changed:
                         st.rerun()
@@ -330,7 +305,7 @@ else:
             idxs = [names.index(n) for n in selected]
             df = concat_groups(idxs)
 
-        # Источник: новые файлы (с опцией сохранить в группу)
+        # Источник: новые файлы (с опцией сохранить в группу, дубликаты разрешены)
         else:
             up_files = st.sidebar.file_uploader("Загрузите CSV (можно несколько)", type=["csv"], accept_multiple_files=True, key="ga_upload")
             df_list = []
@@ -344,7 +319,7 @@ else:
                 st.stop()
             df = pd.concat(df_list, ignore_index=True)
 
-            # Сохранение в группу при желании
+            # Сохранение в группу при желании (без дедупа)
             if st.sidebar.checkbox("Сохранить эти файлы в группу"):
                 mode = st.sidebar.radio("Куда сохранить", ["В существующую группу", "Создать новую"])
                 if mode == "В существующую группу":
@@ -354,43 +329,33 @@ else:
                         names = [g["name"] for g in st.session_state["groups"]]
                         gi = st.sidebar.selectbox("Группа", list(range(len(names))), format_func=lambda i: names[i])
                         if st.sidebar.button("Сохранить"):
-                            # ДЕДУП ТОЛЬКО ВНУТРИ ВЫБРАННОЙ ГРУППЫ
-                            known = group_hashes(gi)
-                            added, skipped = 0, 0
+                            added = 0
                             for uf in up_files:
                                 pack = load_uploaded_file(uf)
-                                if pack["hash"] in known:
-                                    skipped += 1
-                                    continue
                                 if pack["df"] is None or pack["df"].empty:
                                     continue
                                 st.session_state["groups"][gi]["files"].append(pack)
-                                known.add(pack["hash"])
                                 added += 1
                             if added:
-                                st.success(f"Добавлено файлов: {added}. Пропущено дублей (внутри группы): {skipped}.")
+                                st.success(f"Добавлено файлов: {added}.")
                                 st.rerun()
                             else:
-                                st.info("Новых файлов не добавлено (дубликаты внутри группы или пустые).")
+                                st.info("Новые файлы не добавлены (пустые/повреждены).")
                 else:
                     new_name = st.sidebar.text_input("Название новой группы", value=f"GA Group {len(st.session_state['groups'])+1}")
                     if st.sidebar.button("Создать и сохранить"):
-                        known = set()
                         new_files = []
                         for uf in up_files:
                             pack = load_uploaded_file(uf)
-                            if pack["hash"] in known:
-                                continue
                             if pack["df"] is None or pack["df"].empty:
                                 continue
                             new_files.append(pack)
-                            known.add(pack["hash"])
                         if new_files:
                             st.session_state["groups"].append({"name": new_name.strip() or "New Group", "files": new_files})
                             st.success("Группа создана.")
                             st.rerun()
                         else:
-                            st.info("Новые файлы не добавлены (дубликаты внутри набора или пустые).")
+                            st.info("Новые файлы не добавлены (пустые/повреждены).")
 
         # Очистка строк «ИТОГО»
         try:
