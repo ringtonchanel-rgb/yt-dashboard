@@ -296,7 +296,7 @@ if nav.endswith("Dashboard"):
                         changed = True
                     if add_more:
                         added = 0
-                        for uf in add_more:
+                for uf in add_more:
     pack = load_uploaded_file(uf)
     if (pack["df"] is None) or (pack["df"].empty):
         continue
