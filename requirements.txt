@@ -19,4 +19,5 @@ streamlit-plotly-events==0.0.6
 streamlit
 pandas
 plotly
-streamlit, pandas, numpy, plotly, openai>=1.40.0
+numpy
+openai>=1.40.0
