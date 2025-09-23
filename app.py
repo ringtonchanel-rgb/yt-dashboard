@@ -1,5 +1,6 @@
-# app.py — YouTube Analytics Tools (Dashboard + Group Analytics)
-# NEW: Chart Builder — выбор типа графика, сортировки, стэкинга, ориентации и т.д.
+# app.py — YouTube Analytics Tools
+# Dashboard + Group Analytics + Chart Builder
+# (c) You — build freely :)
 
 import streamlit as st
 import pandas as pd
@@ -8,13 +9,25 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io, re, hashlib
 
-# --------------------------- UI CONFIG ---------------------------
+# --------------------------- CONFIG ---------------------------
 st.set_page_config(page_title="YouTube Analytics Tools", layout="wide")
+
 USE_EMOJI = True
 ICON_DASH  = "📊 " if USE_EMOJI else ""
 ICON_GROUP = "🧩 " if USE_EMOJI else ""
 ICON_BRAND = "📺 " if USE_EMOJI else ""
 
+# rerun helper (works across Streamlit versions)
+def do_rerun():
+    try:
+        st.rerun()
+    except Exception:
+        try:
+            st.experimental_rerun()  # older versions
+        except Exception:
+            pass
+
+# --------------------------- SIDEBAR BRAND ---------------------------
 st.sidebar.markdown(
     f"<div style='font-weight:700;font-size:1.05rem;letter-spacing:.1px;'>{ICON_BRAND}YouTube Analytics Tools</div>",
     unsafe_allow_html=True,
@@ -23,16 +36,16 @@ st.sidebar.divider()
 nav = st.sidebar.radio("Навигация", [f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics"])
 st.sidebar.divider()
 
-# --------------------------- HELPERS: columns / parsing ---------------------------
+# --------------------------- HELPERS: column detection & parsing ---------------------------
 def _norm(s: str) -> str:
     return str(s).strip().lower()
 
 MAP = {
-    "publish_time": ["video publish time","publish time","время публикации видео","дата публикации","publish date"],
+    "publish_time": ["video publish time","publish time","время публикации видео","дата публикации","publish date","upload date"],
     "views": ["views","просмотры","просмторы","просмотры (views)"],
-    "impressions": ["impressions","показы","показы (impressions)","показы значков","показы для значков"],
+    "impressions": ["impressions","показы","показы (impressions)","показы значков","показы для значков","показы для значков видео"],
     "ctr": ["impressions click-through rate","ctr","ctr (%)","ctr for thumbnails (%)","ctr для значков",
-            "ctr для значков видео (%)","ctr для значков (%)","ctr для значков видео","ctr видео"],
+            "ctr для значков видео (%)","ctr для значков (%)","ctr видео"],
     "avd": ["average view duration","avg view duration","средняя продолжительность просмотра",
             "средняя продолжительность просмотра видео","average view duration (hh:mm:ss)"],
     "title": ["title","название видео","video title","видео","название"],
@@ -122,18 +135,19 @@ def load_uploaded_file(uploaded_file):
         meta = f"✅ {uploaded_file.name}: {df.shape[0]} строк, {df.shape[1]} колонок."
     return {"name": uploaded_file.name, "hash": h, "df": df, "meta": meta}
 
-# --------------------------- SESSION STORAGE ---------------------------
+# --------------------------- SESSION STORE ---------------------------
 if "groups" not in st.session_state:
-    st.session_state["groups"] = []   # [{name: str, files: [{name, hash, df, meta}, ...]}]
+    st.session_state["groups"] = []   # [{name: str, files: [{name,hash,df,meta}, ...]}]
 
+# --------------------------- METRIC HELPERS ---------------------------
 def kpis_for_group(group):
     total_impr = 0.0
     total_views = 0.0
-    ctr_vals = []
-    avd_vals = []
+    ctr_vals, avd_vals = [], []
     for f in group["files"]:
         df = f["df"]
-        if df is None or df.empty: continue
+        if df is None or df.empty: 
+            continue
         C = detect_columns(df)
         if C["impressions"] and C["impressions"] in df.columns:
             total_impr += pd.to_numeric(df[C["impressions"]].apply(to_number), errors="coerce").fillna(0).sum()
@@ -147,7 +161,6 @@ def kpis_for_group(group):
     avg_avd = float(np.nanmean(avd_vals)) if avd_vals else np.nan
     return dict(impressions=int(total_impr), views=int(total_views), ctr=avg_ctr, avd_sec=avg_avd)
 
-# --------------------------- AGGREGATORS ---------------------------
 def df_with_core_cols(df: pd.DataFrame) -> pd.DataFrame:
     C = detect_columns(df)
     out = pd.DataFrame(index=range(len(df)))
@@ -165,23 +178,17 @@ def df_with_core_cols(df: pd.DataFrame) -> pd.DataFrame:
         out["avd_sec"] = df[C["avd"]].apply(parse_duration_to_seconds)
     return out
 
-def concat_groups(indices):
-    frames = []
-    for i in indices:
-        if 0 <= i < len(st.session_state["groups"]):
-            for f in st.session_state["groups"][i]["files"]:
-                if f["df"] is not None and not f["df"].empty:
-                    frames.append(f["df"])
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
 def timeseries_for_group(group: dict, freq: str = "M") -> pd.DataFrame:
     rows = []
     for f in group["files"]:
-        if f["df"] is None or f["df"].empty: continue
+        if f["df"] is None or f["df"].empty: 
+            continue
         base = df_with_core_cols(f["df"])
-        if "publish_time" not in base: continue
+        if "publish_time" not in base:
+            continue
         tmp = base.dropna(subset=["publish_time"]).copy()
-        if tmp.empty: continue
+        if tmp.empty:
+            continue
         tmp["_period"] = tmp["publish_time"].dt.to_period(freq).dt.to_timestamp()
         rows.append(tmp[["_period","impressions","views","ctr","avd_sec"]])
     if not rows:
@@ -200,7 +207,6 @@ def timeseries_for_group(group: dict, freq: str = "M") -> pd.DataFrame:
     return ag
 
 def monthly_aggregate_for_group(group: dict) -> pd.DataFrame:
-    # для Dashboard
     ts = timeseries_for_group(group, freq="M")
     return (ts.rename(columns={"Date":"Месяц","Impressions":"Показы","Views":"Просмотры","AVD_sec":"AVD_sec"})
              [["Месяц","Показы","Просмотры","AVD_sec"]])
@@ -208,11 +214,14 @@ def monthly_aggregate_for_group(group: dict) -> pd.DataFrame:
 def by_year_for_group(group: dict) -> pd.DataFrame:
     rows = []
     for f in group["files"]:
-        if f["df"] is None or f["df"].empty: continue
+        if f["df"] is None or f["df"].empty: 
+            continue
         base = df_with_core_cols(f["df"])
-        if "publish_time" not in base: continue
+        if "publish_time" not in base: 
+            continue
         tmp = base.dropna(subset=["publish_time"]).copy()
-        if tmp.empty: continue
+        if tmp.empty: 
+            continue
         tmp["_year"] = tmp["publish_time"].dt.year
         rows.append(tmp[["_year","impressions","views","ctr","avd_sec"]])
     if not rows:
@@ -230,9 +239,11 @@ def by_year_for_group(group: dict) -> pd.DataFrame:
 def by_title_for_group(group: dict, topn: int = 20) -> pd.DataFrame:
     rows = []
     for f in group["files"]:
-        if f["df"] is None or f["df"].empty: continue
+        if f["df"] is None or f["df"].empty: 
+            continue
         base = df_with_core_cols(f["df"])
-        if "title" not in base: continue
+        if "title" not in base: 
+            continue
         rows.append(base[["title","impressions","views","ctr","avd_sec"]])
     if not rows:
         return pd.DataFrame(columns=["Название","Показы","Просмотры","CTR","AVD_sec"])
@@ -243,17 +254,14 @@ def by_title_for_group(group: dict, topn: int = 20) -> pd.DataFrame:
                     CTR=("ctr","mean"),
                     AVD_sec=("avd_sec","mean"))
                .reset_index()
-               .rename(columns={"title":"Название"})
-          )
-    # отберем топ по просмотрам
-    ag = ag.sort_values("Просмотры", ascending=False).head(topn)
-    return ag
+               .rename(columns={"title":"Название"}))
+    return ag.sort_values("Просмотры", ascending=False).head(topn)
 
 # --------------------------- DASHBOARD ---------------------------
 if nav.endswith("Dashboard"):
     st.header("Dashboard")
 
-    # --- Добавить новую группу
+    # Add group
     with st.sidebar.expander("➕ Добавить группу данных", expanded=True):
         group_name = st.text_input("Название группы (канала)", value=f"Group {len(st.session_state['groups'])+1}")
         files = st.file_uploader("Загрузите один или несколько CSV", type=["csv"], accept_multiple_files=True, key="add_group_files")
@@ -266,20 +274,19 @@ if nav.endswith("Dashboard"):
                 new_files = []
                 for uf in files:
                     pack = load_uploaded_file(uf)
-                    if pack["df"] is None or pack["df"].empty:
+                    if (pack["df"] is None) or (pack["df"].empty):
                         continue
-                    new_files.append(pack)   # дубликаты разрешены
+                    new_files.append(pack)   # duplicates allowed
                 if new_files:
                     st.session_state["groups"].append({"name": group_name.strip(), "files": new_files})
                     st.success(f"Группа добавлена. Загружено файлов: {len(new_files)}.")
-                    st.rerun()
+                    do_rerun()
                 else:
                     st.error("Не удалось добавить файлы (возможно пустые/повреждены).")
 
     if not st.session_state["groups"]:
         st.info("Добавьте хотя бы одну группу в сайдбаре.")
     else:
-        # --- Управление группами
         st.markdown("### Управление группами")
         for gi, g in enumerate(st.session_state["groups"]):
             with st.expander(f"Группа: {g['name']}", expanded=False):
@@ -296,17 +303,17 @@ if nav.endswith("Dashboard"):
                         changed = True
                     if add_more:
                         added = 0
-                for uf in add_more:
-    pack = load_uploaded_file(uf)
-    if (pack["df"] is None) or (pack["df"].empty):
-        continue
-    g["files"].append(pack)   # дубликаты разрешены
-    added += 1
+                        for uf in add_more:
+                            pack = load_uploaded_file(uf)
+                            if (pack["df"] is None) or (pack["df"].empty):
+                                continue
+                            g["files"].append(pack)   # duplicates allowed
+                            added += 1
                         if added:
                             st.success(f"Добавлено файлов: {added}.")
                             changed = True
                     if changed:
-                        st.rerun()
+                        do_rerun()
                     else:
                         st.info("Изменений нет — нечего сохранять.")
 
@@ -319,15 +326,15 @@ if nav.endswith("Dashboard"):
                         with c1: st.write(f["meta"])
                         with c2:
                             if st.button("Удалить", key=f"del_file_{gi}_{fi}"):
-                                g["files"].pop(fi); st.rerun()
+                                g["files"].pop(fi); do_rerun()
 
                 st.divider()
                 if st.button("Удалить группу", key=f"del_group_{gi}"):
-                    st.session_state["groups"].pop(gi); st.rerun()
+                    st.session_state["groups"].pop(gi); do_rerun()
 
         st.divider()
 
-        # --- KPI и ПОМЕСЯЧНЫЕ ГРАФИКИ ПО КАЖДОЙ ГРУППЕ ---
+        # KPI and monthly charts for each group
         st.markdown("### Сводка по группам")
         kpi_rows = []
         for gi, g in enumerate(st.session_state["groups"]):
@@ -381,7 +388,7 @@ else:
         ["Наложение метрик (Timeseries)", "График-конструктор (Chart Builder)"]
     )
 
-    # --------- Timeseries Overlay (как в предыдущей версии) ---------
+    # --------- Timeseries Overlay ----------
     if tool.startswith("Наложение"):
         if not st.session_state["groups"]:
             st.info("Нет групп. Добавьте их в Dashboard.")
@@ -396,7 +403,8 @@ else:
         avd_minutes = st.checkbox("AVD в минутах", value=False)
 
         if mode == "Метрики одной группы":
-            gi = st.selectbox("Группа", range(len(st.session_state["groups"])), format_func=lambda i: st.session_state["groups"][i]["name"])
+            gi = st.selectbox("Группа", range(len(st.session_state["groups"])),
+                              format_func=lambda i: st.session_state["groups"][i]["name"])
             group = st.session_state["groups"][gi]
             ts = timeseries_for_group(group, freq=freq)
             if ts.empty:
@@ -410,7 +418,8 @@ else:
                     if c in df.columns: df[c] = df[c].rolling(smooth, min_periods=1).mean()
             if index100:
                 for c in metrics_show:
-                    s = df[c].copy(); first = s[s>0].iloc[0] if not s[s>0].empty else np.nan
+                    s = df[c].copy()
+                    first = s[s>0].iloc[0] if not s[s>0].empty else np.nan
                     if not pd.isna(first) and first!=0: df[c] = s/first*100
             if avd_minutes and "AVD_sec" in metrics_show and not index100:
                 df["AVD_sec"] = df["AVD_sec"]/60.0
@@ -444,6 +453,7 @@ else:
                     if not pd.isna(first) and first!=0: s[name]=s[name]/first*100
                 series.append(s)
             if not series: st.warning("Недостаточно данных"); st.stop()
+            from functools import reduce
             df = reduce(lambda l,r: pd.merge(l,r,on="Date",how="outer"), series).sort_values("Date")
             y_title = {"Impressions":"Показы","Views":"Просмотры","CTR":"CTR, %","AVD_sec":"AVD, сек"}[metric]
             fig = go.Figure()
@@ -453,7 +463,7 @@ else:
             fig.update_layout(template="simple_white", height=480, xaxis_title="Период", yaxis_title=y_title)
             st.plotly_chart(fig, use_container_width=True)
 
-    # --------- NEW: Chart Builder ---------
+    # --------- Chart Builder ----------
     else:
         st.subheader("График-конструктор (Chart Builder)")
 
@@ -461,13 +471,11 @@ else:
             st.info("Нет групп. Добавьте их в Dashboard.")
             st.stop()
 
-        # Источник и набор групп
         names = [g["name"] for g in st.session_state["groups"]]
         groups_pick = st.multiselect("Группы данных", names, default=[names[0]])
         if not groups_pick: st.stop()
         groups = [st.session_state["groups"][names.index(n)] for n in groups_pick]
 
-        # Измерение / периодичность / topN
         dim = st.selectbox("Измерение", ["Период", "Год публикации", "Название видео (Top-N)"])
         if dim == "Период":
             freq_map = {"Месяц":"M", "Неделя":"W", "Квартал":"Q"}
@@ -477,22 +485,20 @@ else:
             freq = None
         topn = st.slider("Top-N (для названий)", 3, 100, 20) if dim == "Название видео (Top-N)" else None
 
-        # Тип графика
         chart_type = st.selectbox(
             "Тип графика",
             ["Линия","Область","Столбцы","Горизонтальные столбцы","Точки","Круг (pie)","Кольцо (donut)"]
         )
-        # Метрики
+
         metrics_all = ["Impressions","Views","CTR","AVD_sec"]
         if chart_type in ["Круг (pie)","Кольцо (donut)"]:
             metrics = [st.selectbox("Метрика", metrics_all, index=1)]
         else:
             metrics = st.multiselect("Метрики", metrics_all, default=["Views"])
 
-        # Визуальные опции
         col1, col2, col3 = st.columns(3)
         with col1:
-            stacked = st.checkbox("Стэкинг", value=True if chart_type in ["Область","Столбцы","Горизонтальные столбцы"] else False)
+            stacked = st.checkbox("Стэкинг", value=chart_type in ["Область","Столбцы","Горизонтальные столбцы"])
         with col2:
             markers = st.checkbox("Маркеры", value=chart_type in ["Линия","Точки"])
         with col3:
@@ -500,13 +506,10 @@ else:
 
         smooth = st.slider("Сглаживание (скользящее среднее), периодов", 1, 12, 1) if chart_type in ["Линия","Область","Точки"] else 1
 
-        # Сортировка
         sort_mode = st.selectbox("Сортировка", ["Нет","По метрике (возр.)","По метрике (убыв.)","По категории (А→Я)","По категории (Я→А)"])
         sort_metric = st.selectbox("Метрика для сортировки", metrics_all, index=1)
 
-        # ---- Подготовка данных
         def build_dataset():
-            # объединяем группы в одну таблицу по выбранному измерению
             frames=[]
             if dim == "Период":
                 for g in groups:
@@ -522,7 +525,7 @@ else:
                     df = df.rename(columns={"Год":"Категория","Показы":"Impressions","Просмотры":"Views"})
                     df["Группа"] = g["name"]
                     frames.append(df[["Категория","Impressions","Views","CTR","AVD_sec","Группа"]])
-            else: # Название видео (Top-N) — берём из первой выбранной группы (логичнее)
+            else:
                 g = groups[0]
                 df = by_title_for_group(g, topn=topn).rename(columns={"Название":"Категория","Показы":"Impressions","Просмотры":"Views"})
                 df["Группа"] = g["name"]
@@ -531,10 +534,8 @@ else:
             if not frames:
                 return pd.DataFrame(columns=["Категория","Группа"]+metrics_all)
             data = pd.concat(frames, ignore_index=True)
-            # AVD в минуты (если нужно)
             if avd_minutes and "AVD_sec" in data.columns:
                 data["AVD_sec"] = data["AVD_sec"]/60.0
-            # сглаживание для временных рядов (только для одной группы/категории)
             if dim == "Период" and smooth>1 and chart_type in ["Линия","Область","Точки"]:
                 data = data.sort_values("Категория")
                 for m in metrics_all:
@@ -547,23 +548,18 @@ else:
             st.warning("Недостаточно данных для графика.")
             st.stop()
 
-        # ---- Сортировка
         if sort_mode != "Нет":
             asc = sort_mode in ["По метрике (возр.)","По категории (А→Я)"]
             if sort_mode.startswith("По метрике"):
                 if sort_metric in data.columns:
                     data = data.sort_values(sort_metric, ascending=asc)
             else:
-                # по категории
                 data = data.sort_values("Категория", ascending=asc)
 
-        # ---- Рендеринг
         def render_chart(df: pd.DataFrame):
-            # Для pie/donut допускаем только одну метрику и одну группу
             if chart_type in ["Круг (pie)","Кольцо (donut)"]:
                 m = metrics[0]
                 if len(df["Группа"].unique())>1:
-                    # суммируем по категориям для всех групп
                     pie_df = df.groupby("Категория", as_index=False)[m].sum()
                     fig = px.pie(pie_df, names="Категория", values=m, hole=0.4 if chart_type=="Кольцо (donut)" else 0)
                 else:
@@ -572,11 +568,7 @@ else:
                 fig.update_layout(template="simple_white", height=520, legend=dict(orientation="h", y=1.07))
                 return fig
 
-            # остальные типы: можно несколько метрик
-            # если несколько групп — делаем facet по группам, иначе — обычный
             multi_groups = len(df["Группа"].unique())>1
-
-            # расплавим метрики в длинный формат для удобства
             melted = df.melt(id_vars=["Категория","Группа"], value_vars=[m for m in metrics if m in df.columns],
                              var_name="Метрика", value_name="Значение")
 
@@ -586,8 +578,6 @@ else:
                               line_group="Метрика" if not multi_groups else "Метрика",
                               facet_col="Группа" if multi_groups else None,
                               markers=markers, template="simple_white")
-                if stacked:  # для линий pseudo-stacked не делаем — оставим просто линии
-                    pass
 
             elif chart_type == "Область":
                 fig = px.area(melted, x="Категория", y="Значение",
@@ -595,7 +585,6 @@ else:
                               facet_col="Группа" if multi_groups else None,
                               groupnorm=None, template="simple_white")
                 if not stacked:
-                    # превратим в обычные линии если стэкинг выключен
                     fig.update_traces(fill=None)
 
             elif chart_type == "Столбцы":
@@ -617,7 +606,7 @@ else:
                                  color="Метрика" if not multi_groups else "Группа",
                                  facet_col="Группа" if multi_groups else None,
                                  template="simple_white")
-                if markers is False:
+                if not markers:
                     fig.update_traces(mode="lines")
 
             else:
