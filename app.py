@@ -3,12 +3,21 @@ import pandas as pd
 import numpy as np
 import io, re
 import plotly.express as px
-from datetime import datetime
 
 st.set_page_config(page_title="YouTube Channelytics", layout="wide")
 
 # ============================
-# Utils: нормализация колонок
+# ГАРАНТИРОВАННАЯ ИНИЦИАЛИЗАЦИЯ STATE
+# ============================
+if "groups" not in st.session_state or not isinstance(st.session_state.get("groups"), dict):
+    st.session_state["groups"] = {}          # имя_группы -> {"df": DataFrame, "allow_dups": bool}
+
+def reset_state():
+    st.session_state["groups"] = {}
+    st.success("Состояние сброшено.")
+
+# ============================
+# Утилиты нормализации колонок
 # ============================
 def _norm(s: str) -> str:
     return str(s).strip().lower()
@@ -73,7 +82,6 @@ def fmt_time_from_hours(hours):
     return f"{m:d}:{s:02d}"
 
 def yt_link(row):
-    # приоритет video_link; иначе по video_id; иначе None
     link = row.get("video_link")
     if isinstance(link,str) and link.strip():
         return link.strip()
@@ -82,12 +90,9 @@ def yt_link(row):
         return f"https://www.youtube.com/watch?v={vid.strip()}"
     return None
 
-# ========================================
-# Хранилище: группы в session_state
-# ========================================
-if "groups" not in st.session_state:
-    st.session_state.groups = {}  # name -> {"df": DataFrame, "allow_dups": bool}
-
+# ============================
+# Парсер CSV (мультифайлы)
+# ============================
 def parse_many(files, allow_dups=True):
     dfs=[]
     meta=[]
@@ -107,7 +112,6 @@ def parse_many(files, allow_dups=True):
         df.columns=[c.strip() for c in df.columns]
         cols = detect_columns(df)
 
-        # обязательное: publish time
         if not cols["publish_time"]:
             meta.append(f"⚠️ {uf.name}: нет даты публикации — пропускаю.")
             continue
@@ -116,7 +120,6 @@ def parse_many(files, allow_dups=True):
         out["publish_time"] = pd.to_datetime(df[cols["publish_time"]], errors="coerce")
         out = out.dropna(subset=["publish_time"])
 
-        # опционал
         if cols["title"]: out["title"] = df[cols["title"]].astype(str)
         if cols["video_id"]: out["video_id"] = df[cols["video_id"]].astype(str)
         if cols["video_link"]: out["video_link"] = df[cols["video_link"]].astype(str)
@@ -138,28 +141,25 @@ def parse_many(files, allow_dups=True):
         return None, meta
 
     big = pd.concat(dfs, ignore_index=True)
-    # дубликаты: по (title,publish_time) — как разумный компромисс для выгрузок
     if not allow_dups and "title" in big:
         before = len(big)
         big = big.drop_duplicates(subset=["title","publish_time"])
         meta.append(f"↪️ удалены дубликаты: {before-len(big)}")
     return big, meta
 
-# ==========================
+# ============================
 # Sidebar: навигация + группы
-# ==========================
+# ============================
 st.sidebar.markdown("### 📺 YouTube Analytics Tools")
 page = st.sidebar.radio("Навигация", ["Dashboard","Channel Explorer","Compare Groups","Manage Groups"], index=0)
 
-# --- Управление группами ---
 st.sidebar.markdown("---")
 with st.sidebar.expander("➕ Добавить/обновить группу", expanded=(page=="Manage Groups")):
     with st.form("add_group_form", clear_on_submit=False):
         gname = st.text_input("Название группы (канала)", value="")
         uploaded = st.file_uploader("Загрузите один или несколько CSV", type=["csv"], accept_multiple_files=True)
-        allow_dups = st.checkbox("Разрешать дубли строк", value=False, help="Если выключено — удаляем повторы по (Название, Дата публикации).")
+        allow_dups = st.checkbox("Разрешать дубли строк", value=False)
         submitted = st.form_submit_button("Сохранить/обновить группу")
-
     if submitted:
         if not gname.strip():
             st.warning("Дайте имя группе.")
@@ -169,25 +169,27 @@ with st.sidebar.expander("➕ Добавить/обновить группу", e
             df_parsed, notes = parse_many(uploaded, allow_dups=allow_dups)
             for n in notes: st.write(n)
             if df_parsed is not None and not df_parsed.empty:
-                st.session_state.groups[gname] = {"df": df_parsed, "allow_dups": allow_dups}
-                st.success(f"Группа «{gname}» сохранена: {df_parsed.shape[0]} строк, {df_parsed.shape[1]} колонок.")
+                st.session_state["groups"][gname] = {"df": df_parsed, "allow_dups": allow_dups}
+                st.success(f"Группа «{gname}» сохранена: {df_parsed.shape[0]} строк.")
 
-# список групп + быстрое удаление
-if st.session_state.groups:
+# безопасный список групп
+groups = st.session_state.get("groups", {})
+group_names = sorted(list(groups.keys()))
+
+if groups:
     st.sidebar.markdown("#### Ваши группы:")
-    for k in list(st.session_state.groups.keys()):
+    # БЕЗ прямого обращения атрибутом (только словарь)
+    for k in list(groups.keys()):
         colA, colB = st.sidebar.columns([3,1])
         colA.write(k)
         if colB.button("✖", key=f"del_{k}"):
-            st.session_state.groups.pop(k, None)
+            groups.pop(k, None)
+            st.session_state["groups"] = groups
             st.experimental_rerun()
 
     if st.sidebar.button("Очистить все группы"):
-        st.session_state.groups.clear()
+        reset_state()
         st.experimental_rerun()
-
-# Если страницам нужна группа — выбираем:
-group_names = sorted(list(st.session_state.groups.keys()))
 
 # ======================
 # KPI helpers
@@ -226,15 +228,13 @@ if page=="Dashboard":
         st.stop()
 
     g = st.selectbox("Группа", group_names, index=0)
-    df_g = st.session_state.groups[g]["df"].copy()
+    df_g = groups[g]["df"].copy()
 
-    # Фильтр по дате публикации
     years_sorted = sorted(df_g["pub_year"].dropna().unique())
     y_from, y_to = st.select_slider("Диапазон лет публикации", options=years_sorted, value=(years_sorted[0], years_sorted[-1]))
     mask = (df_g["pub_year"]>=y_from) & (df_g["pub_year"]<=y_to)
     df_g = df_g.loc[mask].copy()
 
-    # KPI
     v, imp, ctr, avd = kpi_for_df(df_g)
     c1,c2,c3,c4 = st.columns(4)
     c1.metric("Показы (сумма)", fmt_int(imp))
@@ -275,15 +275,12 @@ if page=="Dashboard":
         df_top = df_top[df_top["title"].str.contains(kw, case=False, na=False)]
     df_top = df_top.sort_values(sort_by, ascending=False).head(topn)
 
-    # готовим кликабельную ссылку и красивую таблицу
     df_view = df_top.copy()
     df_view["YouTube"] = df_view.apply(yt_link, axis=1)
     if "ctr" in df_view: df_view["CTR"] = df_view["ctr"].round(2).astype(str)+"%"
-    if "watch_hours" in df_view:
-        # AVD на видео (если есть просмотры)
-        if "views" in df_view:
-            safe_v = df_view["views"].replace(0,np.nan)
-            df_view["AVD"] = ((df_view["watch_hours"]*3600)/safe_v).apply(lambda s: fmt_time_from_hours(s/3600))
+    if "watch_hours" in df_view and "views" in df_view:
+        safe_v = df_view["views"].replace(0,np.nan)
+        df_view["AVD"] = ((df_view["watch_hours"]*3600)/safe_v).apply(lambda s: fmt_time_from_hours(s/3600))
     cols_show = [c for c in ["title","views","impressions","CTR","AVD","YouTube","publish_time"] if c in df_view.columns]
     st.dataframe(df_view[cols_show].rename(columns={
         "title":"Название","views":"Просмотры","impressions":"Показы","publish_time":"Публикация"
@@ -298,11 +295,10 @@ elif page=="Channel Explorer":
         st.info("Добавьте группу во вкладке **Manage Groups**.")
         st.stop()
     g = st.selectbox("Группа", group_names, index=0)
-    df_g = st.session_state.groups[g]["df"].copy()
+    df_g = groups[g]["df"].copy()
 
     metric = st.selectbox("Метрика", [m for m in ["views","impressions","watch_hours","ctr"] if m in df_g.columns],
                           format_func=lambda x: {"views":"Просмотры","impressions":"Показы","watch_hours":"Часы просмотра","ctr":"CTR"}[x])
-    # Года
     years_sorted = sorted(df_g["pub_year"].dropna().unique())
     y_from, y_to = st.select_slider("Года публикации", options=years_sorted, value=(years_sorted[0], years_sorted[-1]))
     mask = (df_g["pub_year"]>=y_from) & (df_g["pub_year"]<=y_to)
@@ -313,45 +309,10 @@ elif page=="Channel Explorer":
     if byyear.empty:
         st.warning("Нет данных этой метрики.")
     else:
-        fig = px.bar(byyear.rename(columns={metric:"value"}), x="Год", y="value", template="simple_white", color_discrete_sequence=["#4e79a7"])
+        fig = px.bar(byyear.rename(columns={metric:"value"}), x="Год", y="value", template="simple_white",
+                     color_discrete_sequence=["#4e79a7"])
         fig.update_layout(height=420, yaxis_title=metric)
         st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Когортные кривые (год публикации → янв…дек)")
-    mode = st.radio("Режим", ["Кумулятивный рост","Помесячно"], horizontal=True)
-    normalize = st.checkbox("Нормализовать кривые 0–100%", value=False)
-    display_k = st.slider("Показать ТОП-N лет", 1, len(years_sorted), min(5,len(years_sorted)))
-
-    # Аггрегация по (год,месяц)
-    month_agg = (df_g.groupby([df_g["publish_time"].dt.year, df_g["publish_time"].dt.month])[metric]
-                 .sum().reset_index())
-    month_agg.columns = ["Год","Месяц","value"]
-
-    total_by_year = month_agg.groupby("Год")["value"].sum().sort_values(ascending=False)
-    top_years = total_by_year.index.tolist()[:display_k]
-    cur = month_agg[month_agg["Год"].isin(top_years)].copy()
-
-    piv = cur.pivot_table(index="Год", columns="Месяц", values="value", aggfunc="sum").fillna(0.0)
-    for m in range(1,13):
-        if m not in piv.columns: piv[m]=0.0
-    piv = piv[sorted(piv.columns)]
-    if mode.startswith("Кумулятив"):
-        piv = piv.cumsum(axis=1)
-    if normalize:
-        base = piv.max(axis=1) if mode.startswith("Кумулятив") else piv.sum(axis=1)
-        piv = piv.div(base.where(base>0,np.nan), axis=0)*100.0
-        y_lab = f"{metric} (норм., %)"
-    else:
-        y_lab = metric
-
-    curve = piv.reset_index().melt(id_vars="Год", var_name="Месяц", value_name="value")
-    curve["Месяц"]=curve["Месяц"].astype(int)
-    months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-    curve["Метка"] = curve["Месяц"].apply(lambda m: months[m-1])
-
-    figc = px.line(curve, x="Метка", y="value", color="Год", markers=True, template="simple_white")
-    figc.update_layout(height=480, yaxis_title=y_lab, legend=dict(orientation="h", y=1.02, yanchor="bottom"))
-    st.plotly_chart(figc, use_container_width=True)
 
 # ======================
 # COMPARE GROUPS
@@ -366,17 +327,16 @@ elif page=="Compare Groups":
 
     records=[]
     for g in selected:
-        d = st.session_state.groups[g]["df"]
+        d = groups[g]["df"]
         v, imp, ctr, avd = kpi_for_df(d)
         records.append({
             "Группа": g,
-            "Показы": v if np.isnan(imp) else imp,
+            "Показы": imp,
             "Просмотры": v,
             "CTR (ср.)": ctr,
             "AVD (ср.)": avd
         })
     table = pd.DataFrame(records)
-    # оформление
     if "CTR (ср.)" in table: table["CTR (ср.)"] = table["CTR (ср.)"].apply(lambda x: f"{round(x,2)}%" if pd.notna(x) else "—")
     if "AVD (ср.)" in table: table["AVD (ср.)"] = table["AVD (ср.)"].apply(lambda s: fmt_time_from_hours(s/3600) if pd.notna(s) else "—")
     if "Показы" in table: table["Показы"] = table["Показы"].apply(fmt_int)
@@ -388,12 +348,13 @@ elif page=="Compare Groups":
 # ======================
 elif page=="Manage Groups":
     st.title("🧰 Manage Groups")
+    st.button("Сбросить состояние (очистить всё)", on_click=reset_state, type="secondary")
     if not group_names:
         st.info("Пока нет групп. Добавьте их в сайдбаре (вверху).")
     else:
         for g in group_names:
             with st.expander(f"Группа: {g}", expanded=False):
-                df_g = st.session_state.groups[g]["df"]
-                allow_dups = st.session_state.groups[g]["allow_dups"]
+                df_g = groups[g]["df"]
+                allow_dups = groups[g]["allow_dups"]
                 st.write(f"Строк: **{len(df_g)}**, колонок: **{df_g.shape[1]}**, дубли разрешены: **{allow_dups}**")
                 st.dataframe(df_g.head(20), use_container_width=True)
