@@ -1,43 +1,58 @@
-# app.py — Shell with Top Navbar + Group Analytics → Year Mix
-# Навбар: YouTube Analytics Tools | [Dashboard] [Group Analytics ▼]
-# В Group Analytics доступен пункт: "Сравнение по годам" (два графика + автокомментарий)
+# app.py — Navbar с иконками (эмодзи) + Group Analytics → Year Mix
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 
+# ===== Настройки =====
+USE_EMOJI = True  # если на устройстве эмодзи не видно — поставь False
+
+ICON_DASH = "📊 " if USE_EMOJI else ""
+ICON_GROUP = "🧩 " if USE_EMOJI else ""
+ICON_BRAND = "📺 " if USE_EMOJI else ""
+
 # ---------- Page ----------
 st.set_page_config(page_title="YouTube Analytics Tools", layout="wide")
 st.markdown("""
 <style>
 /* компактный верхний отступ */
-.block-container {padding-top: 1.2rem;}
-/* лёгкий стиль для заголовка слева */
-.yt-brand {font-weight:700; font-size:1.15rem; letter-spacing:.2px;}
-.nav-wrap {display:flex; gap:1rem; align-items:center;}
-/* подпись для подзаголовков */
-h3 {margin-top: .6rem;}
+.block-container {padding-top: 1.1rem;}
+/* бренд слева */
+.yt-brand {font-weight:700; font-size:1.10rem; letter-spacing:.2px;}
+/* радиокнопки как сегменты */
+[data-baseweb="radio"] > div { gap: 0.75rem; }
+[data-baseweb="radio"] label { 
+  padding: .45rem .85rem; 
+  border: 1px solid rgba(0,0,0,.08);
+  border-radius: 10px;
+}
+[data-baseweb="radio"] input:checked + div ~ div { 
+  /* Streamlit вложения сложные; стилизуем сам label: */
+}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------- Top "Navbar" ----------
-top = st.columns([1.2, 1.8])
-with top[0]:
-    st.markdown("<div class='yt-brand'>▶️ YouTube Analytics Tools</div>", unsafe_allow_html=True)
-with top[1]:
-    # Радио имитирует переключатели и подсвечивает активный пункт
-    nav = st.radio("",
-                   options=["Dashboard", "Group Analytics"],
-                   horizontal=True,
-                   label_visibility="collapsed")
+left, right = st.columns([1.2, 2.0])
+with left:
+    st.markdown(f"<div class='yt-brand'>{ICON_BRAND}YouTube Analytics Tools</div>", unsafe_allow_html=True)
+
+with right:
+    nav = st.radio(
+        label="Навигация",
+        options=[f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="nav_choice",
+    )
 
 st.divider()
 
 # ======================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (для аналитики «Сравнение по годам»)
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (для «Сравнение по годам»)
 # ======================================================================
-def _norm(s: str) -> str: 
+def _norm(s: str) -> str:
     return s.strip().lower()
 
 MAP = {
@@ -51,11 +66,10 @@ def find_col(df: pd.DataFrame, names) -> str | None:
     if isinstance(names, str):
         names = [names]
     by_norm = {_norm(c): c for c in df.columns}
-    # точное совпадение (по нормализованному имени)
     for n in names:
-        if _norm(n) in by_norm:
-            return by_norm[_norm(n)]
-    # поиск по подстроке
+        nn = _norm(n)
+        if nn in by_norm:
+            return by_norm[nn]
     for n in names:
         nn = _norm(n)
         for c in df.columns:
@@ -68,8 +82,7 @@ def detect_columns(df: pd.DataFrame):
             "views": find_col(df, MAP["views"])}
 
 def close_enough(a, b, tol=0.12):
-    """Почти одинаковые величины (по умолчанию ±12%)."""
-    if pd.isna(a) or pd.isna(b): 
+    if pd.isna(a) or pd.isna(b):
         return False
     base = max(abs(b), 1e-9)
     return abs(a - b) / base <= tol
@@ -78,26 +91,21 @@ def close_enough(a, b, tol=0.12):
 # ROUTES
 # ======================================================================
 
-if nav == "Dashboard":
-    # Левая панель пустая для этой страницы
+if nav.endswith("Dashboard"):
     st.sidebar.header("Параметры")
     st.sidebar.info("Раздел **Dashboard** будет наполнен позже. Пока настроек нет.")
-    # Контент страницы
     st.subheader("Dashboard")
     st.info("Здесь будут общие метрики канала, KPI, тренды и быстрые инсайты. "
             "Страница создана и готова к наполнению.")
 
-elif nav == "Group Analytics":
-    # Всплывающее меню анализа
+else:  # Group Analytics
     st.sidebar.header("Групповой анализ")
-    tool = st.selectbox("Выберите инструмент анализа", 
-                        ["Сравнение по годам (Year Mix)"])
+    tool = st.selectbox("Выберите инструмент анализа", ["Сравнение по годам (Year Mix)"])
 
-    # ---------------------- YEAR MIX ----------------------
     if tool.startswith("Сравнение по годам"):
         st.subheader("Сравнение по годам (Year Mix)")
 
-        # Данные (для этого инструмента — нужны прямо тут)
+        # Данные для инструмента
         st.sidebar.markdown("### Данные")
         file = st.sidebar.file_uploader(
             "Загрузите CSV из YouTube Studio", type=["csv"], key="upload_yearmix"
@@ -112,7 +120,7 @@ elif nav == "Group Analytics":
         df = pd.read_csv(file)
         df.columns = [c.strip() for c in df.columns]
 
-        # убрать возможные строки 'ИТОГО'
+        # убрать «ИТОГО», если встречается
         try:
             df = df[~df.apply(lambda r: r.astype(str).str.contains("итог", case=False).any(), axis=1)]
         except Exception:
@@ -153,7 +161,7 @@ elif nav == "Group Analytics":
             st.info("Недостаточно данных для построения графиков по годам.")
             st.stop()
 
-        # Опорный год для текста
+        # Опорный год
         years_list = sorted(views_year["Год"].dropna().astype(int).unique())
         default_ref = 2024 if 2024 in years_list else int(max(years_list))
         ref_year = st.selectbox("Опорный год для текста-аналитики", years_list,
@@ -195,7 +203,7 @@ elif nav == "Group Analytics":
             tbl = pd.merge(views_year, count_year, on="Год", how="outer").sort_values("Год")
             st.dataframe(tbl, use_container_width=True)
 
-        # --- АВТОТЕКСТ ---
+        # --- Автотекст ---
         st.markdown("### 🧠 Автокомментарий по данным")
         vy = dict(zip(views_year["Год"], views_year["Суммарное количество просмотров"]))
         cy = dict(zip(count_year["Год"], count_year["Количество видео"]))
@@ -211,9 +219,7 @@ elif nav == "Group Analytics":
         cnt_prev = cy.get(prev_year, np.nan) if prev_year else np.nan
 
         parts = []
-        parts.append(
-            f"Опорная точка — **{ref_year}**. Ниже — расклад по годам: где больше всего просмотров и сколько видео вышло."
-        )
+        parts.append(f"Опорная точка — **{ref_year}**. Ниже — расклад по годам: где больше всего просмотров и сколько видео вышло.")
         if ranking_years:
             parts.append("Лидируют по просмотрам: **" + " → ".join(ranking_years) + "**.")
 
@@ -242,7 +248,3 @@ elif nav == "Group Analytics":
                 st.markdown("• " + s)
         else:
             st.write("Недостаточно данных для содержательного вывода — загрузите отчёт с несколькими годами.")
-
-# ======================================================================
-# Конец
-# ======================================================================
