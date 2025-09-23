@@ -1,768 +1,399 @@
-# app.py — YouTube Analytics Tools
-# Dashboard + Group Analytics (+ XY-Constructor + Year compare)
-# (c) You — build freely :)
-
 import streamlit as st
 import pandas as pd
 import numpy as np
+import io, re
 import plotly.express as px
-import plotly.graph_objects as go
-import io, re, hashlib
-from functools import reduce
+from datetime import datetime
 
-# --------------------------- CONFIG ---------------------------
-st.set_page_config(page_title="YouTube Analytics Tools", layout="wide")
+st.set_page_config(page_title="YouTube Channelytics", layout="wide")
 
-USE_EMOJI = True
-ICON_DASH  = "📊 " if USE_EMOJI else ""
-ICON_GROUP = "🧩 " if USE_EMOJI else ""
-ICON_BRAND = "📺 " if USE_EMOJI else ""
-
-def do_rerun():
-    try:
-        st.rerun()
-    except Exception:
-        try:
-            st.experimental_rerun()
-        except Exception:
-            pass
-
-# --------------------------- SIDEBAR BRAND ---------------------------
-st.sidebar.markdown(
-    f"<div style='font-weight:700;font-size:1.05rem;letter-spacing:.1px;'>{ICON_BRAND}YouTube Analytics Tools</div>",
-    unsafe_allow_html=True,
-)
-st.sidebar.divider()
-nav = st.sidebar.radio("Навигация", [f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics"])
-st.sidebar.divider()
-
-# --------------------------- HELPERS: column detection & parsing ---------------------------
+# ============================
+# Utils: нормализация колонок
+# ============================
 def _norm(s: str) -> str:
     return str(s).strip().lower()
 
-MAP = {
-    "publish_time": ["video publish time","publish time","время публикации видео","дата публикации","publish date","upload date"],
-    "views": ["views","просмотры","просмторы","просмотры (views)"],
-    "impressions": ["impressions","показы","показы (impressions)","показы значков","показы для значков","показы для значков видео"],
-    "ctr": ["impressions click-through rate","ctr","ctr (%)","ctr for thumbnails (%)","ctr для значков",
-            "ctr для значков видео (%)","ctr для значков (%)","ctr видео"],
-    "avd": ["average view duration","avg view duration","средняя продолжительность просмотра",
-            "средняя продолжительность просмотра видео","average view duration (hh:mm:ss)"],
-    "title": ["title","название видео","video title","видео","название"],
+COLMAP = {
+    "publish_time": [
+        "video publish time","publish time","publish date","upload date",
+        "время публикации видео","дата публикации","дата"
+    ],
+    "title": ["title","video title","название видео","название","content","контент"],
+    "video_id": ["video id","id","контент","ид видео","ид"],
+    "video_link": ["youtube link","link","ссылка","url"],
+    "views": ["views","просмотры","просмторы"],
+    "impressions": ["impressions","показы","показы для значков"],
+    "ctr": ["impressions click-through rate","ctr","ctr (%)","ctr для значков","ctr видео"],
+    "watch_hours": ["watch time (hours)","watch time hours","время просмотра (часы)","время просмотра (часов)"],
+    "watch_minutes":["watch time (minutes)","watch time (mins)","время просмотра (мин)","время просмотра (минуты)"],
 }
 
-def find_col(df: pd.DataFrame, names) -> str | None:
-    if isinstance(names, str):
-        names = [names]
-    by_norm = {_norm(c): c for c in df.columns}
+def find_col(df, names):
+    if isinstance(names, str): names=[names]
+    pool = {_norm(c): c for c in df.columns}
+    # точное
     for n in names:
-        nn = _norm(n)
-        if nn in by_norm:
-            return by_norm[nn]
+        nn=_norm(n)
+        if nn in pool: return pool[nn]
+    # частичное
     for n in names:
-        nn = _norm(n)
+        nn=_norm(n)
         for c in df.columns:
-            if nn in _norm(c):
-                return c
+            if nn in _norm(c): return c
     return None
 
-def detect_columns(df: pd.DataFrame):
-    return {k: find_col(df, v) for k, v in MAP.items()}
+def detect_columns(df):
+    return {k: find_col(df, v) for k,v in COLMAP.items()}
 
 def to_number(x):
-    if x is None:
-        return np.nan
-    if isinstance(x, (int, float, np.number)):
-        return float(x)
+    if x is None: return np.nan
+    if isinstance(x,(int,float,np.number)): return float(x)
     s = str(x).strip()
-    if s == "" or s.lower() in {"nan", "none"}:
-        return np.nan
-    s = s.replace(" ", "").replace("\u202f", "").replace("\xa0", "")
-    is_percent = s.endswith("%")
-    if is_percent:
-        s = s[:-1]
+    if s=="" or s.lower() in {"nan","none"}: return np.nan
+    s = s.replace(" ", "").replace("\u202f","").replace("\xa0","")
+    if s.endswith("%"): s = s[:-1]
     if "," in s and "." not in s:
         s = s.replace(",", ".")
-    try:
-        return float(s)
-    except Exception:
-        return np.nan
+    try: return float(s)
+    except: return np.nan
 
-def parse_duration_to_seconds(x):
-    if x is None or (isinstance(x, float) and np.isnan(x)):
-        return np.nan
-    if isinstance(x, (int, float, np.number)):
-        return float(x)
-    s = str(x).strip()
-    if s == "":
-        return np.nan
-    m = re.match(r"^(\d+):(\d{2}):(\d{2})$", s)
-    if m:
-        h, m_, s_ = map(int, m.groups())
-        return h * 3600 + m_ * 60 + s_
-    m = re.match(r"^(\d+):(\d{2})$", s)
-    if m:
-        m_, s_ = map(int, m.groups())
-        return m_ * 60 + s_
+def fmt_int(n):
     try:
-        return float(s)
-    except Exception:
-        return np.nan
-
-def seconds_to_hhmmss(sec):
-    if pd.isna(sec):
+        n = int(round(float(n)))
+        return f"{n:,}".replace(",", " ")
+    except:
         return "—"
-    sec = int(round(sec))
-    h = sec // 3600
-    m = (sec % 3600) // 60
-    s = sec % 60
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-# --------------------------- FILE LOADER ---------------------------
-def load_uploaded_file(uploaded_file):
-    raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
-    h = hashlib.md5(raw).hexdigest()
-    df = None
-    for enc in (None, "utf-8-sig", "cp1251"):
-        try:
-            df = pd.read_csv(io.BytesIO(raw), encoding=enc) if enc else pd.read_csv(io.BytesIO(raw))
-            break
-        except Exception:
-            df = None
-    meta = "❌ не удалось прочитать CSV."
-    if df is not None and not df.empty:
-        df.columns = [c.strip() for c in df.columns]
-        meta = f"✅ {uploaded_file.name}: {df.shape[0]} строк, {df.shape[1]} колонок."
-    return {"name": uploaded_file.name, "hash": h, "df": df, "meta": meta}
+def fmt_time_from_hours(hours):
+    if pd.isna(hours) or hours<=0: return "—"
+    sec = int(hours*3600)
+    m, s = divmod(sec, 60)
+    h, m = divmod(m, 60)
+    if h>0: return f"{h:d}:{m:02d}:{s:02d}"
+    return f"{m:d}:{s:02d}"
 
-# --------------------------- SESSION STORE ---------------------------
+def yt_link(row):
+    # приоритет video_link; иначе по video_id; иначе None
+    link = row.get("video_link")
+    if isinstance(link,str) and link.strip():
+        return link.strip()
+    vid  = row.get("video_id")
+    if isinstance(vid,str) and vid.strip():
+        return f"https://www.youtube.com/watch?v={vid.strip()}"
+    return None
+
+# ========================================
+# Хранилище: группы в session_state
+# ========================================
 if "groups" not in st.session_state:
-    st.session_state["groups"] = []   # [{name: str, files: [{name,hash,df,meta}, ...]}]
+    st.session_state.groups = {}  # name -> {"df": DataFrame, "allow_dups": bool}
 
-# --------------------------- METRIC HELPERS ---------------------------
-def kpis_for_group(group):
-    total_impr = 0.0
-    total_views = 0.0
-    ctr_vals, avd_vals = [], []
-    for f in group["files"]:
-        df = f["df"]
+def parse_many(files, allow_dups=True):
+    dfs=[]
+    meta=[]
+    for uf in files:
+        raw = uf.getvalue()
+        df=None
+        for enc in (None,"utf-8-sig","cp1251"):
+            try:
+                df = pd.read_csv(io.BytesIO(raw), encoding=enc) if enc else pd.read_csv(io.BytesIO(raw))
+                break
+            except Exception:
+                pass
         if df is None or df.empty:
+            meta.append(f"❌ {uf.name}: не удалось прочитать CSV")
             continue
-        C = detect_columns(df)
-        if C["impressions"] and C["impressions"] in df.columns:
-            total_impr += pd.to_numeric(df[C["impressions"]].apply(to_number), errors="coerce").fillna(0).sum()
-        if C["views"] and C["views"] in df.columns:
-            total_views += pd.to_numeric(df[C["views"]].apply(to_number), errors="coerce").fillna(0).sum()
-        if C["ctr"] and C["ctr"] in df.columns:
-            ctr_vals += list(df[C["ctr"]].apply(to_number).dropna().values)
-        if C["avd"] and C["avd"] in df.columns:
-            avd_vals += list(df[C["avd"]].apply(parse_duration_to_seconds).dropna().values)
-    avg_ctr = float(np.nanmean(ctr_vals)) if ctr_vals else np.nan
-    avg_avd = float(np.nanmean(avd_vals)) if avd_vals else np.nan
-    return dict(impressions=int(total_impr), views=int(total_views), ctr=avg_ctr, avd_sec=avg_avd)
 
-def df_with_core_cols(df: pd.DataFrame) -> pd.DataFrame:
-    C = detect_columns(df)
-    out = pd.DataFrame(index=range(len(df)))
-    if C["publish_time"] and C["publish_time"] in df.columns:
-        out["publish_time"] = pd.to_datetime(df[C["publish_time"]], errors="coerce")
-    if C["title"] and C["title"] in df.columns:
-        out["title"] = df[C["title"]].astype(str)
-    if C["impressions"] and C["impressions"] in df.columns:
-        out["impressions"] = pd.to_numeric(df[C["impressions"]].apply(to_number), errors="coerce")
-    if C["views"] and C["views"] in df.columns:
-        out["views"] = pd.to_numeric(df[C["views"]].apply(to_number), errors="coerce")
-    if C["ctr"] and C["ctr"] in df.columns:
-        out["ctr"] = pd.to_numeric(df[C["ctr"]].apply(to_number), errors="coerce")
-    if C["avd"] and C["avd"] in df.columns:
-        out["avd_sec"] = df[C["avd"]].apply(parse_duration_to_seconds)
-    return out
+        df.columns=[c.strip() for c in df.columns]
+        cols = detect_columns(df)
 
-def timeseries_for_group(group: dict, freq: str = "M") -> pd.DataFrame:
-    rows = []
-    for f in group["files"]:
-        if f["df"] is None or f["df"].empty: 
+        # обязательное: publish time
+        if not cols["publish_time"]:
+            meta.append(f"⚠️ {uf.name}: нет даты публикации — пропускаю.")
             continue
-        base = df_with_core_cols(f["df"])
-        if "publish_time" not in base:
-            continue
-        tmp = base.dropna(subset=["publish_time"]).copy()
-        if tmp.empty:
-            continue
-        tmp["_period"] = tmp["publish_time"].dt.to_period(freq).dt.to_timestamp()
-        rows.append(tmp[["_period","impressions","views","ctr","avd_sec"]])
-    if not rows:
-        return pd.DataFrame(columns=["Date","Impressions","Views","CTR","AVD_sec"])
-    all_df = pd.concat(rows, ignore_index=True)
-    ag = (
-        all_df.groupby("_period")
-              .agg(Impressions=("impressions","sum"),
-                   Views=("views","sum"),
-                   CTR=("ctr","mean"),
-                   AVD_sec=("avd_sec","mean"))
-              .reset_index()
-              .rename(columns={"_period":"Date"})
-              .sort_values("Date")
-    )
-    return ag
 
-def monthly_aggregate_for_group(group: dict) -> pd.DataFrame:
-    ts = timeseries_for_group(group, freq="M")
-    return (ts.rename(columns={"Date":"Месяц","Impressions":"Показы","Views":"Просмотры","AVD_sec":"AVD_sec"})
-             [["Месяц","Показы","Просмотры","AVD_sec"]])
+        out = pd.DataFrame()
+        out["publish_time"] = pd.to_datetime(df[cols["publish_time"]], errors="coerce")
+        out = out.dropna(subset=["publish_time"])
 
-def by_year_for_group(group: dict) -> pd.DataFrame:
-    rows = []
-    for f in group["files"]:
-        if f["df"] is None or f["df"].empty: 
-            continue
-        base = df_with_core_cols(f["df"])
-        if "publish_time" not in base: 
-            continue
-        tmp = base.dropna(subset=["publish_time"]).copy()
-        if tmp.empty: 
-            continue
-        tmp["_year"] = tmp["publish_time"].dt.year
-        rows.append(tmp[["_year","impressions","views","ctr","avd_sec"]])
-    if not rows:
-        return pd.DataFrame(columns=["Год","Показы","Просмотры","CTR","AVD_sec"])
-    all_df = pd.concat(rows, ignore_index=True)
-    return (all_df.groupby("_year")
-                 .agg(Показы=("impressions","sum"),
-                      Просмотры=("views","sum"),
-                      CTR=("ctr","mean"),
-                      AVD_sec=("avd_sec","mean"),
-                      Количество_видео=("views","count"))
-                 .reset_index()
-                 .rename(columns={"_year":"Год"})
-                 .sort_values("Год"))
+        # опционал
+        if cols["title"]: out["title"] = df[cols["title"]].astype(str)
+        if cols["video_id"]: out["video_id"] = df[cols["video_id"]].astype(str)
+        if cols["video_link"]: out["video_link"] = df[cols["video_link"]].astype(str)
 
-def by_title_for_group(group: dict, topn: int = 20) -> pd.DataFrame:
-    rows = []
-    for f in group["files"]:
-        if f["df"] is None or f["df"].empty: 
-            continue
-        base = df_with_core_cols(f["df"])
-        if "title" not in base: 
-            continue
-        rows.append(base[["title","impressions","views","ctr","avd_sec"]])
-    if not rows:
-        return pd.DataFrame(columns=["Название","Показы","Просмотры","CTR","AVD_sec"])
-    all_df = pd.concat(rows, ignore_index=True)
-    ag = (all_df.groupby("title")
-               .agg(Показы=("impressions","sum"),
-                    Просмотры=("views","sum"),
-                    CTR=("ctr","mean"),
-                    AVD_sec=("avd_sec","mean"))
-               .reset_index()
-               .rename(columns={"title":"Название"}))
-    return ag.sort_values("Просмотры", ascending=False).head(topn)
+        if cols["views"]: out["views"] = pd.to_numeric(df[cols["views"]].apply(to_number), errors="coerce")
+        if cols["impressions"]: out["impressions"] = pd.to_numeric(df[cols["impressions"]].apply(to_number), errors="coerce")
+        if cols["ctr"]: out["ctr"] = pd.to_numeric(df[cols["ctr"]].apply(to_number), errors="coerce")
+        if cols["watch_hours"]:
+            out["watch_hours"] = pd.to_numeric(df[cols["watch_hours"]].apply(to_number), errors="coerce")
+        elif cols["watch_minutes"]:
+            out["watch_hours"] = pd.to_numeric(df[cols["watch_minutes"]].apply(to_number), errors="coerce")/60.0
 
-# --------------------------- DASHBOARD ---------------------------
-if nav.endswith("Dashboard"):
-    st.header("Dashboard")
+        out["pub_year"] = out["publish_time"].dt.year
+        out["pub_month"] = out["publish_time"].dt.month
+        dfs.append(out)
+        meta.append(f"✅ {uf.name}: {out.shape[0]} строк")
 
-    # Add group
-    with st.sidebar.expander("➕ Добавить группу данных", expanded=True):
-        group_name = st.text_input("Название группы (канала)", value=f"Group {len(st.session_state['groups'])+1}")
-        files = st.file_uploader("Загрузите один или несколько CSV", type=["csv"], accept_multiple_files=True, key="add_group_files")
-        if st.button("Добавить группу"):
-            if not group_name.strip():
-                st.warning("Введите название группы.")
-            elif not files:
-                st.warning("Загрузите хотя бы один CSV.")
-            else:
-                new_files = []
-                for uf in files:
-                    pack = load_uploaded_file(uf)
-                    if (pack["df"] is None) or (pack["df"].empty):
-                        continue
-                    new_files.append(pack)
-                if new_files:
-                    st.session_state["groups"].append({"name": group_name.strip(), "files": new_files})
-                    st.success(f"Группа добавлена. Загружено файлов: {len(new_files)}.")
-                    do_rerun()
-                else:
-                    st.error("Не удалось добавить файлы (возможно пустые/повреждены).")
+    if not dfs:
+        return None, meta
 
-    if not st.session_state["groups"]:
-        st.info("Добавьте хотя бы одну группу в сайдбаре.")
+    big = pd.concat(dfs, ignore_index=True)
+    # дубликаты: по (title,publish_time) — как разумный компромисс для выгрузок
+    if not allow_dups and "title" in big:
+        before = len(big)
+        big = big.drop_duplicates(subset=["title","publish_time"])
+        meta.append(f"↪️ удалены дубликаты: {before-len(big)}")
+    return big, meta
+
+# ==========================
+# Sidebar: навигация + группы
+# ==========================
+st.sidebar.markdown("### 📺 YouTube Analytics Tools")
+page = st.sidebar.radio("Навигация", ["Dashboard","Channel Explorer","Compare Groups","Manage Groups"], index=0)
+
+# --- Управление группами ---
+st.sidebar.markdown("---")
+with st.sidebar.expander("➕ Добавить/обновить группу", expanded=(page=="Manage Groups")):
+    with st.form("add_group_form", clear_on_submit=False):
+        gname = st.text_input("Название группы (канала)", value="")
+        uploaded = st.file_uploader("Загрузите один или несколько CSV", type=["csv"], accept_multiple_files=True)
+        allow_dups = st.checkbox("Разрешать дубли строк", value=False, help="Если выключено — удаляем повторы по (Название, Дата публикации).")
+        submitted = st.form_submit_button("Сохранить/обновить группу")
+
+    if submitted:
+        if not gname.strip():
+            st.warning("Дайте имя группе.")
+        elif not uploaded:
+            st.warning("Прикрепите хотя бы один CSV.")
+        else:
+            df_parsed, notes = parse_many(uploaded, allow_dups=allow_dups)
+            for n in notes: st.write(n)
+            if df_parsed is not None and not df_parsed.empty:
+                st.session_state.groups[gname] = {"df": df_parsed, "allow_dups": allow_dups}
+                st.success(f"Группа «{gname}» сохранена: {df_parsed.shape[0]} строк, {df_parsed.shape[1]} колонок.")
+
+# список групп + быстрое удаление
+if st.session_state.groups:
+    st.sidebar.markdown("#### Ваши группы:")
+    for k in list(st.session_state.groups.keys()):
+        colA, colB = st.sidebar.columns([3,1])
+        colA.write(k)
+        if colB.button("✖", key=f"del_{k}"):
+            st.session_state.groups.pop(k, None)
+            st.experimental_rerun()
+
+    if st.sidebar.button("Очистить все группы"):
+        st.session_state.groups.clear()
+        st.experimental_rerun()
+
+# Если страницам нужна группа — выбираем:
+group_names = sorted(list(st.session_state.groups.keys()))
+
+# ======================
+# KPI helpers
+# ======================
+def kpi_for_df(dff):
+    views = dff["views"].sum() if "views" in dff else np.nan
+    impr  = dff["impressions"].sum() if "impressions" in dff else np.nan
+    ctr   = dff["ctr"].dropna().mean() if "ctr" in dff else np.nan
+    wh    = dff["watch_hours"].sum() if "watch_hours" in dff else np.nan
+    avd   = np.nan
+    if "views" in dff and "watch_hours" in dff:
+        safe_views = dff["views"].replace(0,np.nan)
+        avd = (dff["watch_hours"]*3600).sum() / safe_views.sum()
+    return views, impr, ctr, avd
+
+def monthly_agg(dff, metric):
+    if metric not in dff.columns: return pd.DataFrame(columns=["ym","value"])
+    agg = (dff.groupby([dff["publish_time"].dt.to_period("M")])[metric]
+           .sum()
+           .reset_index(name="value"))
+    agg["ym"] = agg["publish_time"].astype(str)
+    return agg[["ym","value"]]
+
+def by_year_agg(dff, metric):
+    if metric not in dff.columns: return pd.DataFrame(columns=["Год","value"])
+    a = dff.groupby("pub_year")[metric].sum().reset_index().rename(columns={"pub_year":"Год","value":metric})
+    return a
+
+# ======================
+# DASHBOARD
+# ======================
+if page=="Dashboard":
+    st.title("📊 Dashboard")
+    if not group_names:
+        st.info("Сначала добавьте группу во вкладке **Manage Groups**.")
+        st.stop()
+
+    g = st.selectbox("Группа", group_names, index=0)
+    df_g = st.session_state.groups[g]["df"].copy()
+
+    # Фильтр по дате публикации
+    years_sorted = sorted(df_g["pub_year"].dropna().unique())
+    y_from, y_to = st.select_slider("Диапазон лет публикации", options=years_sorted, value=(years_sorted[0], years_sorted[-1]))
+    mask = (df_g["pub_year"]>=y_from) & (df_g["pub_year"]<=y_to)
+    df_g = df_g.loc[mask].copy()
+
+    # KPI
+    v, imp, ctr, avd = kpi_for_df(df_g)
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Показы (сумма)", fmt_int(imp))
+    c2.metric("Просмотры (сумма)", fmt_int(v))
+    c3.metric("Средний CTR", f"{round(ctr,2)}%" if pd.notna(ctr) else "—")
+    c4.metric("Средний AVD", fmt_time_from_hours(avd/3600) if pd.notna(avd) else "—")
+
+    st.markdown("### Тренд по месяцам")
+    metric = st.selectbox("Метрика для тренда", [m for m in ["views","impressions","watch_hours","ctr"] if m in df_g.columns],
+                          format_func=lambda x: {"views":"Просмотры","impressions":"Показы","watch_hours":"Часы просмотра","ctr":"CTR"}[x])
+    chart_type = st.radio("Тип графика", ["line","bar","area"], horizontal=True)
+    smooth = st.slider("Сглаживание (rolling, месяцев)", 1, 6, 1)
+    logy = st.checkbox("Логарифмическая шкала", value=False)
+
+    ma = monthly_agg(df_g, metric)
+    if ma.empty:
+        st.warning("Эта метрика отсутствует в данных.")
     else:
-        st.markdown("### Управление группами")
-        for gi, g in enumerate(st.session_state["groups"]):
-            with st.expander(f"Группа: {g['name']}", expanded=False):
-                new_name = st.text_input("Название", value=g["name"], key=f"rename_{gi}")
-                add_more = st.file_uploader(
-                    "Добавить отчёты в эту группу",
-                    type=["csv"], accept_multiple_files=True, key=f"append_files_{gi}"
-                )
-
-                if st.button("Сохранить изменения", key=f"save_group_{gi}"):
-                    changed = False
-                    if new_name.strip() and new_name.strip() != g["name"]:
-                        g["name"] = new_name.strip()
-                        changed = True
-                    if add_more:
-                        added = 0
-                        for uf in add_more:
-                            pack = load_uploaded_file(uf)
-                            if (pack["df"] is None) or (pack["df"].empty):
-                                continue
-                            g["files"].append(pack)   # дубликаты разрешены
-                            added += 1
-                        if added:
-                            st.success(f"Добавлено файлов: {added}.")
-                            changed = True
-                    if changed:
-                        do_rerun()
-                    else:
-                        st.info("Изменений нет — нечего сохранять.")
-
-                st.markdown("**Файлы группы:**")
-                if not g["files"]:
-                    st.write("— пока нет файлов.")
-                else:
-                    for fi, f in enumerate(g["files"]):
-                        c1, c2 = st.columns([4,1])
-                        with c1: st.write(f["meta"])
-                        with c2:
-                            if st.button("Удалить", key=f"del_file_{gi}_{fi}"):
-                                g["files"].pop(fi); do_rerun()
-
-                st.divider()
-                if st.button("Удалить группу", key=f"del_group_{gi}"):
-                    st.session_state["groups"].pop(gi); do_rerun()
-
-        st.divider()
-
-        # KPI and monthly charts for each group
-        st.markdown("### Сводка по группам")
-        kpi_rows = []
-        for gi, g in enumerate(st.session_state["groups"]):
-            kp = kpis_for_group(g)
-            st.subheader(f"Группа: {g['name']}")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Показы (сумма)", f"{kp['impressions']:,}".replace(",", " "))
-            c2.metric("Просмотры (сумма)", f"{kp['views']:,}".replace(",", " "))
-            c3.metric("Средний CTR по видео", "—" if np.isnan(kp["ctr"]) else f"{kp['ctr']:.2f}%")
-            c4.metric("Средний AVD", seconds_to_hhmmss(kp["avd_sec"]))
-
-            monthly = monthly_aggregate_for_group(g)
-            if monthly.empty:
-                st.info("Недостаточно данных (нет даты публикации) для помесячных графиков.")
-            else:
-                with st.expander("📆 Показы по месяцам", expanded=False):
-                    fig_imp = px.line(monthly, x="Месяц", y="Показы", markers=True, template="simple_white")
-                    fig_imp.update_traces(line_color="#4e79a7")
-                    st.plotly_chart(fig_imp, use_container_width=True, height=400)
-
-                with st.expander("👁 Просмотры по месяцам", expanded=False):
-                    fig_view = px.line(monthly, x="Месяц", y="Просмотры", markers=True, template="simple_white")
-                    fig_view.update_traces(line_color="#59a14f")
-                    st.plotly_chart(fig_view, use_container_width=True, height=400)
-
-                with st.expander("⏱ AVD по месяцам", expanded=False):
-                    tmp = monthly.copy()
-                    tmp["AVD_text"] = tmp["AVD_sec"].apply(seconds_to_hhmmss)
-                    fig_avd = px.line(tmp, x="Месяц", y="AVD_sec", markers=True, template="simple_white",
-                                      hover_data={"AVD_text": True, "AVD_sec": False})
-                    st.plotly_chart(fig_avd, use_container_width=True, height=400)
-
-            st.divider()
-            kpi_rows.append({
-                "Группа": g["name"],
-                "Показы": kp["impressions"],
-                "Просмотры": kp["views"],
-                "CTR, % (среднее)": None if np.isnan(kp["ctr"]) else round(kp["ctr"], 2),
-                "AVD (ср.)": seconds_to_hhmmss(kp["avd_sec"]),
-            })
-        if kpi_rows:
-            st.markdown("### Сравнение групп")
-            comp_df = pd.DataFrame(kpi_rows)
-            st.dataframe(comp_df, use_container_width=True, hide_index=True)
-
-# --------------------------- GROUP ANALYTICS ---------------------------
-else:
-    st.header("Group Analytics")
-    tool = st.sidebar.selectbox(
-        "Выберите инструмент анализа",
-        [
-            "Наложение метрик (Timeseries)",
-            "График-конструктор (Chart Builder)",
-            "XY-Конструктор (Views vs AVD и др.)",
-            "Сравнение по годам (столбики)",
-        ]
-    )
-
-    # --------- Timeseries Overlay ----------
-    if tool.startswith("Наложение"):
-        if not st.session_state["groups"]:
-            st.info("Нет групп. Добавьте их в Dashboard.")
-            st.stop()
-
-        freq_map = {"Месяц":"M", "Неделя":"W", "Квартал":"Q"}
-        freq_label = st.selectbox("Частота агрегации", list(freq_map.keys()), index=0)
-        freq = freq_map[freq_label]
-        mode = st.radio("Режим", ["Метрики одной группы", "Одна метрика по нескольким группам"], horizontal=True)
-        smooth = st.slider("Сглаживание (скользящее среднее), периодов", 1, 12, 1)
-        index100 = st.checkbox("Индексация к 100 (первый ненулевой период)", value=False)
-        avd_minutes = st.checkbox("AVD в минутах", value=False)
-
-        if mode == "Метрики одной группы":
-            gi = st.selectbox("Группа", range(len(st.session_state["groups"])),
-                              format_func=lambda i: st.session_state["groups"][i]["name"])
-            group = st.session_state["groups"][gi]
-            ts = timeseries_for_group(group, freq=freq)
-            if ts.empty:
-                st.warning("Нет данных для рядов.")
-                st.stop()
-            metrics_all = ["Impressions","Views","CTR","AVD_sec"]
-            metrics_show = st.multiselect("Метрики", metrics_all, default=["Impressions","Views","AVD_sec"])
-            df = ts.copy()
-            if smooth > 1:
-                for c in metrics_all:
-                    if c in df.columns: df[c] = df[c].rolling(smooth, min_periods=1).mean()
-            if index100:
-                for c in metrics_show:
-                    s = df[c].copy()
-                    first = s[s>0].iloc[0] if not s[s>0].empty else np.nan
-                    if not pd.isna(first) and first!=0: df[c] = s/first*100
-            if avd_minutes and "AVD_sec" in metrics_show and not index100:
-                df["AVD_sec"] = df["AVD_sec"]/60.0
-
-            left = [m for m in metrics_show if m in ["Impressions","Views"]]
-            right= [m for m in metrics_show if m in ["CTR","AVD_sec"]]
-
-            fig = go.Figure()
-            for m in left:  fig.add_trace(go.Scatter(x=df["Date"], y=df[m], mode="lines+markers", name=m, yaxis="y1"))
-            for m in right: fig.add_trace(go.Scatter(x=df["Date"], y=df[m], mode="lines+markers", name=m, yaxis="y2"))
-            fig.update_layout(template="simple_white", height=480,
-                              xaxis_title="Период", yaxis=dict(title="Значение"),
-                              yaxis2=dict(title="%", overlaying="y", side="right"))
-            st.plotly_chart(fig, use_container_width=True)
-
+        ma["value_smooth"] = ma["value"].rolling(smooth, min_periods=1).mean()
+        y_col = "value_smooth" if smooth>1 else "value"
+        if chart_type=="line":
+            fig = px.line(ma, x="ym", y=y_col, markers=True, template="simple_white")
+        elif chart_type=="bar":
+            fig = px.bar(ma, x="ym", y=y_col, template="simple_white")
         else:
-            names = [g["name"] for g in st.session_state["groups"]]
-            picked = st.multiselect("Группы", names, default=names[:min(3,len(names))])
-            if not picked: st.stop()
-            metric = st.selectbox("Метрика", ["Impressions","Views","CTR","AVD_sec"], index=1)
-            series=[]
-            for name in picked:
-                g = st.session_state["groups"][names.index(name)]
-                ts = timeseries_for_group(g, freq=freq)
-                if ts.empty or metric not in ts.columns: continue
-                s = ts[["Date", metric]].rename(columns={metric:name})
-                if smooth>1: s[name] = s[name].rolling(smooth, min_periods=1).mean()
-                series.append(s)
-            if not series: st.warning("Недостаточно данных"); st.stop()
-            df = reduce(lambda l,r: pd.merge(l,r,on="Date",how="outer"), series).sort_values("Date")
-            y_title = {"Impressions":"Показы","Views":"Просмотры","CTR":"CTR, %","AVD_sec":"AVD, сек"}[metric]
-            fig = go.Figure()
-            for c in df.columns:
-                if c=="Date": continue
-                fig.add_trace(go.Scatter(x=df["Date"], y=df[c], mode="lines+markers", name=c))
-            fig.update_layout(template="simple_white", height=480, xaxis_title="Период", yaxis_title=y_title)
-            st.plotly_chart(fig, use_container_width=True)
-
-    # --------- Chart Builder ----------
-    elif tool.startswith("График-конструктор"):
-        st.subheader("График-конструктор (Chart Builder)")
-
-        if not st.session_state["groups"]:
-            st.info("Нет групп. Добавьте их в Dashboard.")
-            st.stop()
-
-        names = [g["name"] for g in st.session_state["groups"]]
-        groups_pick = st.multiselect("Группы данных", names, default=[names[0]])
-        if not groups_pick: st.stop()
-        groups = [st.session_state["groups"][names.index(n)] for n in groups_pick]
-
-        dim = st.selectbox("Измерение", ["Период", "Год публикации", "Название видео (Top-N)"])
-        if dim == "Период":
-            freq_map = {"Месяц":"M", "Неделя":"W", "Квартал":"Q"}
-            freq_label = st.selectbox("Частота", list(freq_map.keys()), index=0)
-            freq = freq_map[freq_label]
-        else:
-            freq = None
-        topn = st.slider("Top-N (для названий)", 3, 100, 20) if dim == "Название видео (Top-N)" else None
-
-        chart_type = st.selectbox(
-            "Тип графика",
-            ["Линия","Область","Столбцы","Горизонтальные столбцы","Точки","Круг (pie)","Кольцо (donut)"]
-        )
-
-        metrics_all = ["Impressions","Views","CTR","AVD_sec"]
-        if chart_type in ["Круг (pie)","Кольцо (donut)"]:
-            metrics = [st.selectbox("Метрика", metrics_all, index=1)]
-        else:
-            metrics = st.multiselect("Метрики", metrics_all, default=["Views"])
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            stacked = st.checkbox("Стэкинг", value=chart_type in ["Область","Столбцы","Горизонтальные столбцы"])
-        with col2:
-            markers = st.checkbox("Маркеры", value=chart_type in ["Линия","Точки"])
-        with col3:
-            avd_minutes = st.checkbox("AVD в минутах", value=False)
-
-        smooth = st.slider("Сглаживание (скользящее среднее), периодов", 1, 12, 1) if chart_type in ["Линия","Область","Точки"] else 1
-
-        sort_mode = st.selectbox("Сортировка", ["Нет","По метрике (возр.)","По метрике (убыв.)","По категории (А→Я)","По категории (Я→А)"])
-        sort_metric = st.selectbox("Метрика для сортировки", metrics_all, index=1)
-
-        def build_dataset():
-            frames=[]
-            if dim == "Период":
-                for g in groups:
-                    ts = timeseries_for_group(g, freq=freq)
-                    if ts.empty: continue
-                    ts = ts.rename(columns={"Date":"Категория"})
-                    ts["Группа"] = g["name"]
-                    frames.append(ts)
-            elif dim == "Год публикации":
-                for g in groups:
-                    df = by_year_for_group(g)
-                    if df.empty: continue
-                    df = df.rename(columns={"Год":"Категория","Показы":"Impressions","Просмотры":"Views"})
-                    df["Группа"] = g["name"]
-                    frames.append(df[["Категория","Impressions","Views","CTR","AVD_sec","Группа"]])
-            else:
-                g = groups[0]
-                df = by_title_for_group(g, topn=topn).rename(columns={"Название":"Категория","Показы":"Impressions","Просмотры":"Views"})
-                df["Группа"] = g["name"]
-                frames.append(df[["Категория","Impressions","Views","CTR","AVD_sec","Группа"]])
-
-            if not frames:
-                return pd.DataFrame(columns=["Категория","Группа"]+metrics_all)
-            data = pd.concat(frames, ignore_index=True)
-            if avd_minutes and "AVD_sec" in data.columns:
-                data["AVD_sec"] = data["AVD_sec"]/60.0
-            if dim == "Период" and smooth>1 and chart_type in ["Линия","Область","Точки"]:
-                data = data.sort_values("Категория")
-                for m in metrics_all:
-                    if m in data.columns:
-                        data[m] = data.groupby("Группа")[m].transform(lambda s: s.rolling(smooth, min_periods=1).mean())
-            return data
-
-        data = build_dataset()
-        if data.empty:
-            st.warning("Недостаточно данных для графика.")
-            st.stop()
-
-        if sort_mode != "Нет":
-            asc = sort_mode in ["По метрике (возр.)","По категории (А→Я)"]
-            if sort_mode.startswith("По метрике"):
-                if sort_metric in data.columns:
-                    data = data.sort_values(sort_metric, ascending=asc)
-            else:
-                data = data.sort_values("Категория", ascending=asc)
-
-        def render_chart(df: pd.DataFrame):
-            if chart_type in ["Круг (pie)","Кольцо (donut)"]:
-                m = metrics[0]
-                if len(df["Группа"].unique())>1:
-                    pie_df = df.groupby("Категория", as_index=False)[m].sum()
-                    fig = px.pie(pie_df, names="Категория", values=m, hole=0.4 if chart_type=="Кольцо (donut)" else 0)
-                else:
-                    fig = px.pie(df, names="Категория", values=m, color="Категория",
-                                 hole=0.4 if chart_type=="Кольцо (donut)" else 0)
-                fig.update_layout(template="simple_white", height=520, legend=dict(orientation="h", y=1.07))
-                return fig
-
-            multi_groups = len(df["Группа"].unique())>1
-            melted = df.melt(id_vars=["Категория","Группа"], value_vars=[m for m in metrics if m in df.columns],
-                             var_name="Метрика", value_name="Значение")
-
-            if chart_type == "Линия":
-                fig = px.line(melted, x="Категория", y="Значение",
-                              color="Метрика" if not multi_groups else "Группа",
-                              line_group="Метрика" if not multi_groups else "Метрика",
-                              facet_col="Группа" if multi_groups else None,
-                              markers=markers, template="simple_white")
-
-            elif chart_type == "Область":
-                fig = px.area(melted, x="Категория", y="Значение",
-                              color="Метрика" if not multi_groups else "Группа",
-                              facet_col="Группа" if multi_groups else None,
-                              groupnorm=None, template="simple_white")
-                if not stacked:
-                    fig.update_traces(fill=None)
-
-            elif chart_type == "Столбцы":
-                fig = px.bar(melted, x="Категория", y="Значение",
-                             color="Метрика" if not multi_groups else "Группа",
-                             facet_col="Группа" if multi_groups else None,
-                             barmode="relative" if stacked else "group",
-                             template="simple_white")
-
-            elif chart_type == "Горизонтальные столбцы":
-                fig = px.bar(melted, y="Категория", x="Значение",
-                             color="Метрика" if not multi_groups else "Группа",
-                             facet_col="Группа" if multi_groups else None,
-                             barmode="relative" if stacked else "group",
-                             orientation="h", template="simple_white")
-
-            elif chart_type == "Точки":
-                fig = px.scatter(melted, x="Категория", y="Значение",
-                                 color="Метрика" if not multi_groups else "Группа",
-                                 facet_col="Группа" if multi_groups else None,
-                                 template="simple_white")
-                if not markers:
-                    fig.update_traces(mode="lines")
-
-            else:
-                fig = go.Figure()
-
-            fig.update_layout(height=540, margin=dict(l=10, r=10, t=30, b=10),
-                              legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-            return fig
-
-        fig = render_chart(data)
+            fig = px.area(ma, x="ym", y=y_col, template="simple_white")
+        fig.update_layout(height=420, xaxis_title="Месяц публикации", yaxis_title=metric)
+        if logy: fig.update_yaxes(type="log")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.caption("Подсказка: для Pie/Donut выберите одну метрику. Для «Название видео» используется первая выбранная группа (Top-N). Сортировку и Top-N применяйте при сравнении категорий.")
+    st.markdown("### Топ-видео")
+    kw = st.text_input("Поиск по названию", value="")
+    sort_by = st.selectbox("Сортировка", [c for c in ["views","impressions","ctr","watch_hours"] if c in df_g.columns],
+                           format_func=lambda x: {"views":"Просмотры","impressions":"Показы","ctr":"CTR","watch_hours":"Часы просмотра"}[x])
+    topn = st.slider("Сколько видео показать", 5, 50, 15)
+    df_top = df_g.copy()
+    if kw.strip():
+        df_top = df_top[df_top["title"].str.contains(kw, case=False, na=False)]
+    df_top = df_top.sort_values(sort_by, ascending=False).head(topn)
 
-    # --------- XY-Constructor ----------
-    elif tool.startswith("XY-Конструктор"):
-        st.subheader("XY-Конструктор (например, Просмотры vs AVD)")
+    # готовим кликабельную ссылку и красивую таблицу
+    df_view = df_top.copy()
+    df_view["YouTube"] = df_view.apply(yt_link, axis=1)
+    if "ctr" in df_view: df_view["CTR"] = df_view["ctr"].round(2).astype(str)+"%"
+    if "watch_hours" in df_view:
+        # AVD на видео (если есть просмотры)
+        if "views" in df_view:
+            safe_v = df_view["views"].replace(0,np.nan)
+            df_view["AVD"] = ((df_view["watch_hours"]*3600)/safe_v).apply(lambda s: fmt_time_from_hours(s/3600))
+    cols_show = [c for c in ["title","views","impressions","CTR","AVD","YouTube","publish_time"] if c in df_view.columns]
+    st.dataframe(df_view[cols_show].rename(columns={
+        "title":"Название","views":"Просмотры","impressions":"Показы","publish_time":"Публикация"
+    }), use_container_width=True)
 
-        if not st.session_state["groups"]:
-            st.info("Нет групп. Добавьте их в Dashboard.")
-            st.stop()
+# ======================
+# CHANNEL EXPLORER
+# ======================
+elif page=="Channel Explorer":
+    st.title("🔎 Channel Explorer")
+    if not group_names:
+        st.info("Добавьте группу во вкладке **Manage Groups**.")
+        st.stop()
+    g = st.selectbox("Группа", group_names, index=0)
+    df_g = st.session_state.groups[g]["df"].copy()
 
-        names = [g["name"] for g in st.session_state["groups"]]
-        groups_pick = st.multiselect("Группы", names, default=[names[0]])
-        if not groups_pick: st.stop()
-        groups = [st.session_state["groups"][names.index(n)] for n in groups_pick]
+    metric = st.selectbox("Метрика", [m for m in ["views","impressions","watch_hours","ctr"] if m in df_g.columns],
+                          format_func=lambda x: {"views":"Просмотры","impressions":"Показы","watch_hours":"Часы просмотра","ctr":"CTR"}[x])
+    # Года
+    years_sorted = sorted(df_g["pub_year"].dropna().unique())
+    y_from, y_to = st.select_slider("Года публикации", options=years_sorted, value=(years_sorted[0], years_sorted[-1]))
+    mask = (df_g["pub_year"]>=y_from) & (df_g["pub_year"]<=y_to)
+    df_g = df_g.loc[mask].copy()
 
-        data_source = st.selectbox("Источник данных", ["Видео (Top-N по просмотрам)", "Период (месячный)", "Год"])
-        topn = st.slider("Top-N видео", 5, 200, 50) if data_source.startswith("Видео") else None
+    st.subheader("По годам выпуска")
+    byyear = by_year_agg(df_g, metric)
+    if byyear.empty:
+        st.warning("Нет данных этой метрики.")
+    else:
+        fig = px.bar(byyear.rename(columns={metric:"value"}), x="Год", y="value", template="simple_white", color_discrete_sequence=["#4e79a7"])
+        fig.update_layout(height=420, yaxis_title=metric)
+        st.plotly_chart(fig, use_container_width=True)
 
-        metric_map = {"Impressions":"Показы", "Views":"Просмотры", "CTR":"CTR, %", "AVD_sec":"AVD (сек)"}
-        x_metric = st.selectbox("Ось X", list(metric_map.keys()), index=1)  # Views по умолчанию
-        y_metric = st.selectbox("Ось Y", list(metric_map.keys()), index=3)  # AVD_sec по умолчанию
+    st.subheader("Когортные кривые (год публикации → янв…дек)")
+    mode = st.radio("Режим", ["Кумулятивный рост","Помесячно"], horizontal=True)
+    normalize = st.checkbox("Нормализовать кривые 0–100%", value=False)
+    display_k = st.slider("Показать ТОП-N лет", 1, len(years_sorted), min(5,len(years_sorted)))
 
-        chart_type = st.selectbox("Вид графика", ["Scatter","Bubble","Столбцы","Горизонтальные столбцы","Линия"])
-        color_by_group = st.checkbox("Цвет по группе", value=True)
-        size_metric = st.selectbox("Размер точки (для Bubble)", list(metric_map.keys()), index=0) if chart_type=="Bubble" else None
+    # Аггрегация по (год,месяц)
+    month_agg = (df_g.groupby([df_g["publish_time"].dt.year, df_g["publish_time"].dt.month])[metric]
+                 .sum().reset_index())
+    month_agg.columns = ["Год","Месяц","value"]
 
-        trendline = st.checkbox("Тренд-линия (OLS)", value=False)
-        avg_lines = st.checkbox("Показать средние линии", value=True)
-        log_x = st.checkbox("Log-X", value=False)
-        log_y = st.checkbox("Log-Y", value=False)
-        show_labels = st.checkbox("Подписи точек (для Scatter/Bubble)", value=False)
-        avd_minutes = st.checkbox("AVD в минутах", value=True)
+    total_by_year = month_agg.groupby("Год")["value"].sum().sort_values(ascending=False)
+    top_years = total_by_year.index.tolist()[:display_k]
+    cur = month_agg[month_agg["Год"].isin(top_years)].copy()
 
-        # собрать данные
-        def build_xy():
-            frames=[]
-            if data_source.startswith("Видео"):
-                # по видео — берём первую группу
-                g = groups[0]
-                df = by_title_for_group(g, topn=topn).rename(columns={"Показы":"Impressions","Просмотры":"Views"})
-                df["Категория"] = df["Название"] = df["Название"] if "Название" in df.columns else df.index.astype(str)
-                df["Группа"] = g["name"]
-                frames.append(df[["Категория","Название","Группа","Impressions","Views","CTR","AVD_sec"]])
-            elif data_source.startswith("Период"):
-                for g in groups:
-                    ts = timeseries_for_group(g, freq="M")
-                    if ts.empty: continue
-                    ts = ts.rename(columns={"Date":"Категория"})
-                    ts["Название"] = ts["Категория"].dt.strftime("%Y-%m")
-                    ts["Группа"] = g["name"]
-                    frames.append(ts[["Категория","Название","Группа","Impressions","Views","CTR","AVD_sec"]])
-            else:
-                for g in groups:
-                    y = by_year_for_group(g)
-                    if y.empty: continue
-                    y = y.rename(columns={"Год":"Категория","Показы":"Impressions","Просмотры":"Views"})
-                    y["Название"] = y["Категория"].astype(str)
-                    y["Группа"] = g["name"]
-                    frames.append(y[["Категория","Название","Группа","Impressions","Views","CTR","AVD_sec"]])
+    piv = cur.pivot_table(index="Год", columns="Месяц", values="value", aggfunc="sum").fillna(0.0)
+    for m in range(1,13):
+        if m not in piv.columns: piv[m]=0.0
+    piv = piv[sorted(piv.columns)]
+    if mode.startswith("Кумулятив"):
+        piv = piv.cumsum(axis=1)
+    if normalize:
+        base = piv.max(axis=1) if mode.startswith("Кумулятив") else piv.sum(axis=1)
+        piv = piv.div(base.where(base>0,np.nan), axis=0)*100.0
+        y_lab = f"{metric} (норм., %)"
+    else:
+        y_lab = metric
 
-            if not frames:
-                return pd.DataFrame(columns=["Категория","Название","Группа","Impressions","Views","CTR","AVD_sec"])
-            df = pd.concat(frames, ignore_index=True)
-            if avd_minutes:
-                df["AVD_sec"] = df["AVD_sec"]/60.0
-            return df
+    curve = piv.reset_index().melt(id_vars="Год", var_name="Месяц", value_name="value")
+    curve["Месяц"]=curve["Месяц"].astype(int)
+    months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    curve["Метка"] = curve["Месяц"].apply(lambda m: months[m-1])
 
-        data = build_xy()
-        if data.empty:
-            st.warning("Недостаточно данных.")
-            st.stop()
+    figc = px.line(curve, x="Метка", y="value", color="Год", markers=True, template="simple_white")
+    figc.update_layout(height=480, yaxis_title=y_lab, legend=dict(orientation="h", y=1.02, yanchor="bottom"))
+    st.plotly_chart(figc, use_container_width=True)
 
-        # построение
-        if chart_type in ["Scatter","Bubble"]:
-            fig = px.scatter(
-                data, x=x_metric, y=y_metric,
-                color=("Группа" if color_by_group else None),
-                size=(size_metric if chart_type=="Bubble" else None),
-                hover_data=["Название","Группа"],
-                trendline=("ols" if trendline else None),
-                template="simple_white"
-            )
-            if show_labels:
-                fig.update_traces(mode="markers+text", text=data["Название"], textposition="top center",
-                                  selector=dict(mode="markers"))
-            fig.update_layout(height=560, xaxis_title=metric_map[x_metric], yaxis_title=metric_map[y_metric])
-            fig.update_xaxes(type="log" if log_x else "linear")
-            fig.update_yaxes(type="log" if log_y else "linear")
-            if avg_lines:
-                mx = data[x_metric].mean(); my = data[y_metric].mean()
-                fig.add_hline(y=my, line_dash="dot", line_color="#999"); fig.add_vline(x=mx, line_dash="dot", line_color="#999")
-            st.plotly_chart(fig, use_container_width=True)
+# ======================
+# COMPARE GROUPS
+# ======================
+elif page=="Compare Groups":
+    st.title("🆚 Compare Groups")
+    if len(group_names)<2:
+        st.info("Нужно минимум две группы.")
+        st.stop()
+    selected = st.multiselect("Выберите группы", group_names, default=group_names[:2])
+    if not selected: st.stop()
 
-        elif chart_type in ["Столбцы","Горизонтальные столбцы","Линия"]:
-            # для «столбиков» отображаем категория=Название (или период/год), высота = y_metric, сортируем по X если надо
-            df = data.copy()
-            # сортировка «внизу по X» — сортируем по x_metric
-            df = df.sort_values(x_metric, ascending=True)
-            if chart_type == "Столбцы":
-                fig = px.bar(df, x="Название", y=y_metric,
-                             color=("Группа" if color_by_group else None),
-                             hover_data=[x_metric,"Группа"], template="simple_white")
-            elif chart_type == "Горизонтальные столбцы":
-                fig = px.bar(df, y="Название", x=y_metric,
-                             color=("Группа" if color_by_group else None),
-                             hover_data=[x_metric,"Группа"], orientation="h", template="simple_white")
-            else:  # Линия
-                fig = px.line(df, x=x_metric, y=y_metric,
-                              color=("Группа" if color_by_group else None),
-                              markers=True, hover_data=["Название","Группа"], template="simple_white")
-            fig.update_layout(height=560, xaxis_title=(metric_map[x_metric] if chart_type=="Линия" else ""),
-                              yaxis_title=metric_map[y_metric])
-            st.plotly_chart(fig, use_container_width=True)
+    records=[]
+    for g in selected:
+        d = st.session_state.groups[g]["df"]
+        v, imp, ctr, avd = kpi_for_df(d)
+        records.append({
+            "Группа": g,
+            "Показы": v if np.isnan(imp) else imp,
+            "Просмотры": v,
+            "CTR (ср.)": ctr,
+            "AVD (ср.)": avd
+        })
+    table = pd.DataFrame(records)
+    # оформление
+    if "CTR (ср.)" in table: table["CTR (ср.)"] = table["CTR (ср.)"].apply(lambda x: f"{round(x,2)}%" if pd.notna(x) else "—")
+    if "AVD (ср.)" in table: table["AVD (ср.)"] = table["AVD (ср.)"].apply(lambda s: fmt_time_from_hours(s/3600) if pd.notna(s) else "—")
+    if "Показы" in table: table["Показы"] = table["Показы"].apply(fmt_int)
+    if "Просмотры" in table: table["Просмотры"] = table["Просмотры"].apply(fmt_int)
+    st.dataframe(table, use_container_width=True)
 
-        st.caption("Совет: для Scatter выберите X=Просмотры, Y=AVD (мин), включите тренд-линию и средние линии — это быстро выявляет аномалии.")
-
-    # --------- Year compare ----------
-    else:  # Сравнение по годам (столбики)
-        st.subheader("Сравнение по годам — суммы просмотров и количество видео")
-
-        if not st.session_state["groups"]:
-            st.info("Нет групп. Добавьте их в Dashboard.")
-            st.stop()
-
-        gi = st.selectbox("Группа", range(len(st.session_state["groups"])),
-                          format_func=lambda i: st.session_state["groups"][i]["name"])
-        g = st.session_state["groups"][gi]
-        y = by_year_for_group(g)
-        if y.empty:
-            st.warning("Нет данных по годам (похоже, отсутствует «дата публикации»).")
-            st.stop()
-
-        y = y.rename(columns={"Просмотры":"Views", "Количество_видео":"Count"})
-        c1, c2 = st.columns(2)
-
-        with c1:
-            fig1 = px.bar(y, x="Год", y="Views", template="simple_white", color_discrete_sequence=["#4e79a7"])
-            fig1.update_layout(height=420, xaxis_title="Год публикации", yaxis_title="Суммарное количество просмотров")
-            st.plotly_chart(fig1, use_container_width=True)
-
-        with c2:
-            fig2 = px.bar(y, x="Год", y="Count", template="simple_white", color_discrete_sequence=["#59a14f"])
-            fig2.update_layout(height=420, xaxis_title="Год публикации", yaxis_title="Количество видео")
-            st.plotly_chart(fig2, use_container_width=True)
-
-        st.caption("Это та же пара «столбиков по годам»: слева — сколько просмотров принесли ролики года, справа — сколько роликов опубликовано в этом году.")
+# ======================
+# MANAGE GROUPS
+# ======================
+elif page=="Manage Groups":
+    st.title("🧰 Manage Groups")
+    if not group_names:
+        st.info("Пока нет групп. Добавьте их в сайдбаре (вверху).")
+    else:
+        for g in group_names:
+            with st.expander(f"Группа: {g}", expanded=False):
+                df_g = st.session_state.groups[g]["df"]
+                allow_dups = st.session_state.groups[g]["allow_dups"]
+                st.write(f"Строк: **{len(df_g)}**, колонок: **{df_g.shape[1]}**, дубли разрешены: **{allow_dups}**")
+                st.dataframe(df_g.head(20), use_container_width=True)
