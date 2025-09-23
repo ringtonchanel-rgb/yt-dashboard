@@ -1,4 +1,5 @@
-# app.py — Navbar с иконками (эмодзи) + Group Analytics → Year Mix
+# app.py — Responsive navbar + Group Analytics → Year Mix
+# Кнопки навигации переносятся на новую строку при узком экране.
 
 import streamlit as st
 import pandas as pd
@@ -6,35 +7,44 @@ import numpy as np
 import plotly.express as px
 
 # ===== Настройки =====
-USE_EMOJI = True  # если на устройстве эмодзи не видно — поставь False
-
-ICON_DASH = "📊 " if USE_EMOJI else ""
+USE_EMOJI = True  # если эмодзи не показываются в системе — поставьте False
+ICON_DASH  = "📊 " if USE_EMOJI else ""
 ICON_GROUP = "🧩 " if USE_EMOJI else ""
 ICON_BRAND = "📺 " if USE_EMOJI else ""
 
-# ---------- Page ----------
 st.set_page_config(page_title="YouTube Analytics Tools", layout="wide")
+
+# ---------- Адаптивные стили ----------
 st.markdown("""
 <style>
-/* компактный верхний отступ */
-.block-container {padding-top: 1.1rem;}
+/* уменьшили общий верхний отступ для плотности */
+.block-container { padding-top: 0.9rem; }
+
 /* бренд слева */
-.yt-brand {font-weight:700; font-size:1.10rem; letter-spacing:.2px;}
-/* радиокнопки как сегменты */
-[data-baseweb="radio"] > div { gap: 0.75rem; }
-[data-baseweb="radio"] label { 
-  padding: .45rem .85rem; 
+.yt-brand { font-weight: 700; font-size: 1.02rem; letter-spacing: .1px; }
+
+/* радиогруппа навигации: делаем переносы и компактные кнопки */
+[data-baseweb="radio"] > div {
+  display: flex !important;
+  flex-wrap: wrap;               /* ВАЖНО: перенос на новую строку при нехватке места */
+  gap: .45rem .55rem;            /* компактные промежутки */
+}
+
+[data-baseweb="radio"] label {
+  padding: .28rem .55rem;        /* компактные кнопки */
   border: 1px solid rgba(0,0,0,.08);
-  border-radius: 10px;
+  border-radius: 8px;
+  font-size: .92rem;             /* чуть мельче шрифт */
+  white-space: nowrap;           /* чтобы подписи не «ломались» на 2 строки */
 }
-[data-baseweb="radio"] input:checked + div ~ div { 
-  /* Streamlit вложения сложные; стилизуем сам label: */
-}
+
+/* немного сжали заголовки, чтобы помещались при масштабе 100% */
+h3, .stMarkdown h3 { margin-top: .6rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # ---------- Top "Navbar" ----------
-left, right = st.columns([1.2, 2.0])
+left, right = st.columns([1.0, 3.0])  # больше места под кнопки справа
 with left:
     st.markdown(f"<div class='yt-brand'>{ICON_BRAND}YouTube Analytics Tools</div>", unsafe_allow_html=True)
 
@@ -105,7 +115,7 @@ else:  # Group Analytics
     if tool.startswith("Сравнение по годам"):
         st.subheader("Сравнение по годам (Year Mix)")
 
-        # Данные для инструмента
+        # Данные
         st.sidebar.markdown("### Данные")
         file = st.sidebar.file_uploader(
             "Загрузите CSV из YouTube Studio", type=["csv"], key="upload_yearmix"
@@ -116,11 +126,10 @@ else:  # Group Analytics
             st.info("👆 Загрузите CSV — построю два графика и автокомментарий по годам.")
             st.stop()
 
-        # Читаем CSV
         df = pd.read_csv(file)
         df.columns = [c.strip() for c in df.columns]
 
-        # убрать «ИТОГО», если встречается
+        # убрать возможные «ИТОГО»
         try:
             df = df[~df.apply(lambda r: r.astype(str).str.contains("итог", case=False).any(), axis=1)]
         except Exception:
