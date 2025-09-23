@@ -1,5 +1,4 @@
-# app.py — Responsive navbar + Group Analytics → Year Mix
-# Кнопки навигации переносятся на новую строку при узком экране.
+# app.py — Sidebar Navigation + Group Analytics → Year Mix
 
 import streamlit as st
 import pandas as pd
@@ -7,57 +6,27 @@ import numpy as np
 import plotly.express as px
 
 # ===== Настройки =====
-USE_EMOJI = True  # если эмодзи не показываются в системе — поставьте False
+USE_EMOJI = True  # если эмодзи не отображаются — поставьте False
 ICON_DASH  = "📊 " if USE_EMOJI else ""
 ICON_GROUP = "🧩 " if USE_EMOJI else ""
 ICON_BRAND = "📺 " if USE_EMOJI else ""
 
 st.set_page_config(page_title="YouTube Analytics Tools", layout="wide")
 
-# ---------- Адаптивные стили ----------
-st.markdown("""
-<style>
-/* уменьшили общий верхний отступ для плотности */
-.block-container { padding-top: 0.9rem; }
+# ---------------- Sidebar (НАВИГАЦИЯ) ----------------
+st.sidebar.markdown(
+    f"<div style='font-weight:700;font-size:1.05rem;letter-spacing:.1px;'>{ICON_BRAND}YouTube Analytics Tools</div>",
+    unsafe_allow_html=True,
+)
+st.sidebar.divider()
 
-/* бренд слева */
-.yt-brand { font-weight: 700; font-size: 1.02rem; letter-spacing: .1px; }
+nav = st.sidebar.radio(
+    "Навигация",
+    options=[f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics"],
+    label_visibility="visible",
+)
 
-/* радиогруппа навигации: делаем переносы и компактные кнопки */
-[data-baseweb="radio"] > div {
-  display: flex !important;
-  flex-wrap: wrap;               /* ВАЖНО: перенос на новую строку при нехватке места */
-  gap: .45rem .55rem;            /* компактные промежутки */
-}
-
-[data-baseweb="radio"] label {
-  padding: .28rem .55rem;        /* компактные кнопки */
-  border: 1px solid rgba(0,0,0,.08);
-  border-radius: 8px;
-  font-size: .92rem;             /* чуть мельче шрифт */
-  white-space: nowrap;           /* чтобы подписи не «ломались» на 2 строки */
-}
-
-/* немного сжали заголовки, чтобы помещались при масштабе 100% */
-h3, .stMarkdown h3 { margin-top: .6rem; }
-</style>
-""", unsafe_allow_html=True)
-
-# ---------- Top "Navbar" ----------
-left, right = st.columns([1.0, 3.0])  # больше места под кнопки справа
-with left:
-    st.markdown(f"<div class='yt-brand'>{ICON_BRAND}YouTube Analytics Tools</div>", unsafe_allow_html=True)
-
-with right:
-    nav = st.radio(
-        label="Навигация",
-        options=[f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="nav_choice",
-    )
-
-st.divider()
+st.sidebar.divider()
 
 # ======================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (для «Сравнение по годам»)
@@ -92,6 +61,7 @@ def detect_columns(df: pd.DataFrame):
             "views": find_col(df, MAP["views"])}
 
 def close_enough(a, b, tol=0.12):
+    """Почти одинаковые величины (по умолчанию ±12%)."""
     if pd.isna(a) or pd.isna(b):
         return False
     base = max(abs(b), 1e-9)
@@ -102,20 +72,19 @@ def close_enough(a, b, tol=0.12):
 # ======================================================================
 
 if nav.endswith("Dashboard"):
-    st.sidebar.header("Параметры")
-    st.sidebar.info("Раздел **Dashboard** будет наполнен позже. Пока настроек нет.")
-    st.subheader("Dashboard")
+    st.header("Dashboard")
     st.info("Здесь будут общие метрики канала, KPI, тренды и быстрые инсайты. "
             "Страница создана и готова к наполнению.")
 
 else:  # Group Analytics
-    st.sidebar.header("Групповой анализ")
-    tool = st.selectbox("Выберите инструмент анализа", ["Сравнение по годам (Year Mix)"])
+    st.header("Group Analytics")
+    tool = st.sidebar.selectbox("Выберите инструмент анализа", ["Сравнение по годам (Year Mix)"])
 
+    # ---------------------- YEAR MIX ----------------------
     if tool.startswith("Сравнение по годам"):
         st.subheader("Сравнение по годам (Year Mix)")
 
-        # Данные
+        # Данные для инструмента
         st.sidebar.markdown("### Данные")
         file = st.sidebar.file_uploader(
             "Загрузите CSV из YouTube Studio", type=["csv"], key="upload_yearmix"
@@ -126,10 +95,11 @@ else:  # Group Analytics
             st.info("👆 Загрузите CSV — построю два графика и автокомментарий по годам.")
             st.stop()
 
+        # Читаем CSV
         df = pd.read_csv(file)
         df.columns = [c.strip() for c in df.columns]
 
-        # убрать возможные «ИТОГО»
+        # убрать «ИТОГО», если встречается
         try:
             df = df[~df.apply(lambda r: r.astype(str).str.contains("итог", case=False).any(), axis=1)]
         except Exception:
