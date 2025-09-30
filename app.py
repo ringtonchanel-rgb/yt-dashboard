@@ -1,6 +1,7 @@
 # app.py — YouTube Analytics Tools
-# Dashboard (группы + сохранение изменений) и Group Analytics (Year Mix)
-# Дубликаты CSV РАЗРЕШЕНЫ: можно добавлять один и тот же файл сколько угодно раз.
+# Dashboard (группы + сохранение) и Group Analytics (Year Mix)
+# NEW: помесячные графики (Показы, Просмотры, AVD) в разворачиваемых блоках для каждой группы
+# Дубликаты CSV РАЗРЕШЕНЫ.
 
 import streamlit as st
 import pandas as pd
@@ -42,7 +43,7 @@ def find_col(df: pd.DataFrame, names) -> str | None:
     if isinstance(names, str):
         names = [names]
     by_norm = {_norm(c): c for c in df.columns}
-    # точные совпадения
+    # точные
     for n in names:
         nn = _norm(n)
         if nn in by_norm:
@@ -109,15 +110,8 @@ def seconds_to_hhmmss(sec):
 
 # --------------------------- FILE LOADER ---------------------------
 def load_uploaded_file(uploaded_file):
-    """
-    Читаем файл стабильно:
-    - единым байтовым буфером (getvalue/read)
-    - md5-хэш (теперь лишь для информации, дубли разрешены)
-    - пробы кодировок
-    """
     raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
     h = hashlib.md5(raw).hexdigest()
-
     df = None
     for enc in (None, "utf-8-sig", "cp1251"):
         try:
@@ -125,7 +119,6 @@ def load_uploaded_file(uploaded_file):
             break
         except Exception:
             df = None
-
     meta = "❌ не удалось прочитать CSV."
     if df is not None and not df.empty:
         df.columns = [c.strip() for c in df.columns]
@@ -167,6 +160,56 @@ def kpis_for_group(group):
     avg_avd = float(np.nanmean(avd_vals)) if avd_vals else np.nan
     return dict(impressions=int(total_impr), views=int(total_views), ctr=avg_ctr, avd_sec=avg_avd)
 
+# --------------------------- MONTHLY AGG FOR GROUP ---------------------------
+def monthly_aggregate_for_group(group: dict) -> pd.DataFrame:
+    """
+    Возвращает агрегат по месяцам:
+    Месяц | Показы | Просмотры | AVD_sec (среднее)
+    """
+    rows = []
+    for f in group["files"]:
+        df = f["df"]
+        if df is None or df.empty:
+            continue
+        C = detect_columns(df)
+        pub_col = C["publish_time"]
+        if not (pub_col and pub_col in df.columns):
+            continue
+
+        tmp = df.copy()
+        tmp[pub_col] = pd.to_datetime(tmp[pub_col], errors="coerce")
+        tmp = tmp[tmp[pub_col].notna()]
+        if tmp.empty:
+            continue
+
+        # нормализуем
+        imp = C["impressions"]
+        vws = C["views"]
+        avd = C["avd"]
+
+        tmp["_impr"] = pd.to_numeric(tmp[imp].apply(to_number), errors="coerce") if (imp and imp in tmp.columns) else np.nan
+        tmp["_views"] = pd.to_numeric(tmp[vws].apply(to_number), errors="coerce") if (vws and vws in tmp.columns) else np.nan
+        tmp["_avd_sec"] = tmp[avd].apply(parse_duration_to_seconds) if (avd and avd in tmp.columns) else np.nan
+
+        tmp["_month"] = tmp[pub_col].dt.to_period("M").dt.to_timestamp()
+        rows.append(tmp[["_month", "_impr", "_views", "_avd_sec"]])
+
+    if not rows:
+        return pd.DataFrame(columns=["Месяц","Показы","Просмотры","AVD_sec"])
+
+    all_df = pd.concat(rows, ignore_index=True)
+    ag = (
+        all_df.groupby("_month")
+              .agg(Показы=("_impr","sum"), Просмотры=("_views","sum"), AVD_sec=("_avd_sec","mean"))
+              .reset_index()
+              .rename(columns={"_month":"Месяц"})
+              .sort_values("Месяц")
+    )
+    # заполняем NaN нулями для сумм (Показы/Просмотры)
+    ag["Показы"] = ag["Показы"].fillna(0)
+    ag["Просмотры"] = ag["Просмотры"].fillna(0)
+    return ag
+
 # --------------------------- DASHBOARD ---------------------------
 if nav.endswith("Dashboard"):
     st.header("Dashboard")
@@ -186,7 +229,7 @@ if nav.endswith("Dashboard"):
                     pack = load_uploaded_file(uf)
                     if pack["df"] is None or pack["df"].empty:
                         continue
-                    # Дубликаты РАЗРЕШЕНЫ — просто добавляем всё
+                    # Дубликаты РАЗРЕШЕНЫ — добавляем всё
                     new_files.append(pack)
                 if new_files:
                     st.session_state["groups"].append({"name": group_name.strip(), "files": new_files})
@@ -202,41 +245,33 @@ if nav.endswith("Dashboard"):
         st.markdown("### Управление группами")
         for gi, g in enumerate(st.session_state["groups"]):
             with st.expander(f"Группа: {g['name']}", expanded=False):
-                # Поля редактирования
                 new_name = st.text_input("Название", value=g["name"], key=f"rename_{gi}")
                 add_more = st.file_uploader(
                     "Добавить отчёты в эту группу",
                     type=["csv"], accept_multiple_files=True, key=f"append_files_{gi}"
                 )
 
-                # ЕДИНАЯ КНОПКА СОХРАНЕНИЯ
                 if st.button("Сохранить изменения", key=f"save_group_{gi}"):
                     changed = False
-
-                    # Переименование
                     if new_name.strip() and new_name.strip() != g["name"]:
                         g["name"] = new_name.strip()
                         changed = True
-
-                    # Добавление файлов (дубликаты разрешены)
                     if add_more:
                         added = 0
                         for uf in add_more:
                             pack = load_uploaded_file(uf)
                             if pack["df"] is None or pack["df"].empty:
                                 continue
-                            g["files"].append(pack)
+                            g["files"].append(pack)   # дубликаты разрешены
                             added += 1
                         if added:
                             st.success(f"Добавлено файлов: {added}.")
                             changed = True
-
                     if changed:
                         st.rerun()
                     else:
                         st.info("Изменений нет — нечего сохранять.")
 
-                # Список файлов + удаление
                 st.markdown("**Файлы группы:**")
                 if not g["files"]:
                     st.write("— пока нет файлов.")
@@ -251,14 +286,13 @@ if nav.endswith("Dashboard"):
                                 st.rerun()
 
                 st.divider()
-                # Удаление группы
                 if st.button("Удалить группу", key=f"del_group_{gi}"):
                     st.session_state["groups"].pop(gi)
                     st.rerun()
 
         st.divider()
 
-        # --- KPI по группам
+        # --- KPI и ПОМЕСЯЧНЫЕ ГРАФИКИ ПО КАЖДОЙ ГРУППЕ ---
         st.markdown("### Сводка по группам")
         kpi_rows = []
         for gi, g in enumerate(st.session_state["groups"]):
@@ -269,6 +303,58 @@ if nav.endswith("Dashboard"):
             c2.metric("Просмотры (сумма)", f"{kp['views']:,}".replace(",", " "))
             c3.metric("Средний CTR по видео", "—" if np.isnan(kp["ctr"]) else f"{kp['ctr']:.2f}%")
             c4.metric("Средний AVD", seconds_to_hhmmss(kp["avd_sec"]))
+
+            # --- Месячная агрегация и графики в разворачивателях
+            monthly = monthly_aggregate_for_group(g)
+            if monthly.empty:
+                st.info("Недостаточно данных (нет даты публикации) для помесячных графиков.")
+            else:
+                # Показы
+                with st.expander("📆 Показы по месяцам", expanded=False):
+                    fig_imp = px.line(
+                        monthly, x="Месяц", y="Показы",
+                        markers=True, template="simple_white"
+                    )
+                    fig_imp.update_traces(line_color="#4e79a7")
+                    fig_imp.update_layout(
+                        xaxis_title="Месяц", yaxis_title="Показы",
+                        margin=dict(l=10, r=10, t=30, b=10), height=400
+                    )
+                    st.plotly_chart(fig_imp, use_container_width=True)
+
+                # Просмотры
+                with st.expander("👁 Просмотры по месяцам", expanded=False):
+                    fig_view = px.line(
+                        monthly, x="Месяц", y="Просмотры",
+                        markers=True, template="simple_white"
+                    )
+                    fig_view.update_traces(line_color="#59a14f")
+                    fig_view.update_layout(
+                        xaxis_title="Месяц", yaxis_title="Просмотры",
+                        margin=dict(l=10, r=10, t=30, b=10), height=400
+                    )
+                    st.plotly_chart(fig_view, use_container_width=True)
+
+                # AVD
+                with st.expander("⏱ AVD по месяцам", expanded=False):
+                    # добавим текстовую колонку для ховера
+                    tmp = monthly.copy()
+                    tmp["AVD_text"] = tmp["AVD_sec"].apply(seconds_to_hhmmss)
+                    fig_avd = px.line(
+                        tmp, x="Месяц", y="AVD_sec",
+                        markers=True, template="simple_white",
+                        hover_data={"AVD_text": True, "AVD_sec": False}
+                    )
+                    fig_avd.update_traces(line_color="#e15759",
+                                          hovertemplate="Месяц=%{x|%Y-%m}<br>AVD=%{customdata[0]}")
+                    fig_avd.update_layout(
+                        xaxis_title="Месяц", yaxis_title="AVD, сек (ср.)",
+                        margin=dict(l=10, r=10, t=30, b=10), height=400
+                    )
+                    st.plotly_chart(fig_avd, use_container_width=True)
+
+            st.divider()
+
             kpi_rows.append({
                 "Группа": g["name"],
                 "Показы": kp["impressions"],
@@ -276,7 +362,6 @@ if nav.endswith("Dashboard"):
                 "CTR, % (среднее)": None if np.isnan(kp["ctr"]) else round(kp["ctr"], 2),
                 "AVD (ср.)": seconds_to_hhmmss(kp["avd_sec"]),
             })
-            st.divider()
 
         if kpi_rows:
             st.markdown("### Сравнение групп")
@@ -292,7 +377,6 @@ else:
         st.subheader("Сравнение по годам (Year Mix)")
         source_mode = st.sidebar.radio("Источник данных", ["Группы из Dashboard", "Загрузить файлы"])
 
-        # Источник: группы
         if source_mode == "Группы из Dashboard":
             if not st.session_state["groups"]:
                 st.info("Нет групп данных. Сначала добавьте их в Dashboard.")
@@ -305,7 +389,6 @@ else:
             idxs = [names.index(n) for n in selected]
             df = concat_groups(idxs)
 
-        # Источник: новые файлы (с опцией сохранить в группу, дубликаты разрешены)
         else:
             up_files = st.sidebar.file_uploader("Загрузите CSV (можно несколько)", type=["csv"], accept_multiple_files=True, key="ga_upload")
             df_list = []
@@ -319,7 +402,7 @@ else:
                 st.stop()
             df = pd.concat(df_list, ignore_index=True)
 
-            # Сохранение в группу при желании (без дедупа)
+            # Сохранить в группу при желании (дубликаты разрешены)
             if st.sidebar.checkbox("Сохранить эти файлы в группу"):
                 mode = st.sidebar.radio("Куда сохранить", ["В существующую группу", "Создать новую"])
                 if mode == "В существующую группу":
@@ -357,7 +440,7 @@ else:
                         else:
                             st.info("Новые файлы не добавлены (пустые/повреждены).")
 
-        # Очистка строк «ИТОГО»
+        # фильтр «строки ИТОГО»
         try:
             df = df[~df.apply(lambda r: r.astype(str).str.contains("итог", case=False).any(), axis=1)]
         except Exception:
@@ -375,13 +458,11 @@ else:
             st.error("Не хватает колонок: " + ", ".join(missing))
             st.stop()
 
-        # Приведение типов
         df[pub_col] = pd.to_datetime(df[pub_col], errors="coerce")
         df = df[df[pub_col].notna()].copy()
         df["_views_num"] = pd.to_numeric(df[views_col].apply(to_number), errors="coerce")
         df["_year"] = df[pub_col].dt.year
 
-        # Агрегации
         views_year = (
             df.groupby("_year", as_index=False)["_views_num"].sum()
               .rename(columns={"_year":"Год","_views_num":"Суммарное количество просмотров"})
@@ -401,18 +482,15 @@ else:
         default_ref = 2024 if 2024 in years_list else int(max(years_list))
         ref_year = st.selectbox("Опорный год для текста-аналитики", years_list, index=years_list.index(default_ref))
 
-        # Графики
         c1, c2 = st.columns(2)
         fig1 = px.bar(
             views_year, x="Год", y="Суммарное количество просмотров",
             text="Суммарное количество просмотров", template="simple_white"
         )
         fig1.update_traces(marker_color="#4e79a7", texttemplate="%{text:,}", textposition="outside")
-        fig1.update_layout(
-            title="Суммарное количество просмотров по годам",
-            xaxis_title="Год публикации", yaxis_title="Суммарное количество просмотров",
-            showlegend=False, margin=dict(l=10, r=10, t=50, b=10), height=430
-        )
+        fig1.update_layout(title="Суммарное количество просмотров по годам",
+                           xaxis_title="Год публикации", yaxis_title="Суммарное количество просмотров",
+                           showlegend=False, margin=dict(l=10, r=10, t=50, b=10), height=430)
         fig1.update_xaxes(type="category", categoryorder="category ascending")
         c1.plotly_chart(fig1, use_container_width=True)
 
@@ -420,15 +498,12 @@ else:
             count_year, x="Год", y="Количество видео", text="Количество видео", template="simple_white"
         )
         fig2.update_traces(marker_color="#4e79a7", texttemplate="%{text}", textposition="outside")
-        fig2.update_layout(
-            title="Количество видео по годам",
-            xaxis_title="Год публикации", yaxis_title="Количество видео",
-            showlegend=False, margin=dict(l=10, r=10, t=50, b=10), height=430
-        )
+        fig2.update_layout(title="Количество видео по годам",
+                           xaxis_title="Год публикации", yaxis_title="Количество видео",
+                           showlegend=False, margin=dict(l=10, r=10, t=50, b=10), height=430)
         fig2.update_xaxes(type="category", categoryorder="category ascending")
         c2.plotly_chart(fig2, use_container_width=True)
 
-        # Автотекст
         st.markdown("### 🧠 Автокомментарий")
         vy = dict(zip(views_year["Год"], views_year["Суммарное количество просмотров"]))
         cy = dict(zip(count_year["Год"], count_year["Количество видео"]))
