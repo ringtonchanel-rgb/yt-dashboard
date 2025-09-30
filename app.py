@@ -509,3 +509,109 @@ else:
                     answer = f"Ошибка запроса: {e}"
             st.write(answer)
         st.session_state.chat.append(("bot", answer))
+
+
+# === 1) ДОБАВЬ / ПРОВЕРЬ ИМПОРТЫ ВВЕРХУ ФАЙЛА ===
+import os
+import uuid
+import requests
+
+# === 2) ДОБАВЬ ПОСЛЕ СВОЕЙ НАВИГАЦИИ В SIDEBAR ===
+# Было, например:
+# nav = st.sidebar.radio("Навигация", [f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics"])
+# Заменяем на:
+nav = st.sidebar.radio(
+    "Навигация",
+    [f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics", "🤖 Assistant"]
+)
+
+# === 3) ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ЧАТА ===
+def _get_n8n_urls_and_headers():
+    """
+    Берём URL из секрета или env и готовим заголовки.
+    Если в n8n включена авторизация по Bearer токену — тоже подставим.
+    """
+    n8n_url = st.secrets.get("N8N_CHAT_URL") or os.getenv("N8N_CHAT_URL")
+    if not n8n_url:
+        st.error("Не задан N8N_CHAT_URL в Secrets / переменных окружения.")
+        st.stop()
+
+    headers = {"Content-Type": "application/json"}
+    token = st.secrets.get("N8N_TOKEN") or os.getenv("N8N_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return n8n_url, headers
+
+def ask_n8n(question: str, history: list[dict] | None = None, user_id: str | None = None) -> dict:
+    """
+    Делает POST в твой n8n вебхук и возвращает JSON-ответ.
+    Ожидается, что твой n8n workflow возвращает, например:
+      { "answer": "текст ответа", "meta": { ... } }
+    """
+    n8n_url, headers = _get_n8n_urls_and_headers()
+
+    payload = {
+        "question": question,
+        "history": history or [],  # можно пробросить историю, если используешь её в n8n
+        "user_id": user_id or str(uuid.uuid4()),
+        # можно добавить любые кастомные поля, которые ждёт твой Prepare node
+    }
+
+    try:
+        resp = requests.post(n8n_url, json=payload, headers=headers, timeout=60)
+        resp.raise_for_status()
+        return resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"answer": resp.text}
+    except requests.HTTPError as e:
+        return {"answer": f"HTTP error: {e} — {getattr(e.response, 'text', '')}"}
+    except requests.RequestException as e:
+        return {"answer": f"Network error: {e}"}
+    except Exception as e:
+        return {"answer": f"Unexpected error: {e}"}
+
+def render_chat_page():
+    st.title("🤖 Assistant")
+    st.caption("Чат идёт через n8n → OpenAI (Message a model).")
+
+    # Инициализируем историю
+    if "chat_msgs" not in st.session_state:
+        st.session_state.chat_msgs = []
+
+    # Рисуем накопленные сообщения
+    for m in st.session_state.chat_msgs:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    # Поле ввода
+    user_text = st.chat_input("Напишите вопрос…")
+    if user_text:
+        # 1) локально отрисуем пользователя
+        st.session_state.chat_msgs.append({"role": "user", "content": user_text})
+        with st.chat_message("user"):
+            st.markdown(user_text)
+
+        # 2) вызовем n8n
+        with st.chat_message("assistant"):
+            with st.spinner("Думаю…"):
+                # Если в n8n ты используешь историю – можно передать её целиком
+                # (или сжать до нужного формата внутри Prepare Messages)
+                n8n_resp = ask_n8n(
+                    question=user_text,
+                    history=st.session_state.chat_msgs,  # можно заменить на [] если история не нужна
+                    user_id=st.session_state.get("user_id") or str(uuid.uuid4()),
+                )
+                answer = n8n_resp.get("answer", "Пустой ответ 🤖")
+                st.markdown(answer)
+
+        # 3) докинем ассистента в историю
+        st.session_state.chat_msgs.append({"role": "assistant", "content": answer})
+
+        # Кнопка сброса сессии чата (по желанию)
+    cols = st.columns([1,1,6])
+    with cols[0]:
+        if st.button("Очистить диалог"):
+            st.session_state.chat_msgs = []
+            st.rerun()
+
+# === 4) ВЕТКА РЕНДЕРА ЧАТА ===
+if nav == "🤖 Assistant":
+    render_chat_page()
