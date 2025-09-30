@@ -469,3 +469,43 @@ else:
 
         for s in parts:
             st.markdown("• " + s)
+            # ---------- Чат с n8n ----------
+import os, requests, json
+import streamlit as st
+
+N8N_CHAT_URL = os.environ.get("N8N_CHAT_URL")  # ты уже сохранил секрет в App settings → Secrets
+
+st.divider()
+st.subheader("🤖 Chat (n8n webhook)")
+
+if not N8N_CHAT_URL:
+    st.warning("Секрет N8N_CHAT_URL не задан. Задай его в App settings → Secrets и перезапусти приложение.")
+else:
+    # Память чата в сессии
+    if "chat" not in st.session_state:
+        st.session_state.chat = []  # список кортежей: ("user"/"bot", text)
+
+    # Рисуем историю
+    for role, text in st.session_state.chat:
+        st.chat_message("user" if role == "user" else "assistant").write(text)
+
+    # Ввод нового сообщения
+    prompt = st.chat_input("Напишите вопрос…")
+    if prompt:
+        st.session_state.chat.append(("user", prompt))
+        with st.chat_message("assistant"):
+            with st.spinner("Отправляю в n8n…"):
+                try:
+                    payload = {"prompt": prompt, "meta": {"source": "streamlit", "user": "anon"}}
+                    r = requests.post(N8N_CHAT_URL, json=payload, timeout=30)
+                    r.raise_for_status()
+                    # пробуем JSON, иначе текст
+                    if r.headers.get("content-type", "").startswith("application/json"):
+                        data = r.json()
+                        answer = data.get("answer", json.dumps(data, ensure_ascii=False))
+                    else:
+                        answer = r.text
+                except Exception as e:
+                    answer = f"Ошибка запроса: {e}"
+            st.write(answer)
+        st.session_state.chat.append(("bot", answer))
