@@ -5,6 +5,11 @@ import re
 import os
 import uuid
 import hashlib
+import base64
+import json
+import requests
+import uuid
+import os
 import requests
 import numpy as np
 import pandas as pd
@@ -527,3 +532,137 @@ elif nav.endswith("Group Analytics"):
 
 elif nav == "🤖 Assistant":
     render_chat_page()
+
+# --------------------------- 🤖 ASSISTANT (n8n chat) ---------------------------
+elif nav == "🤖 Assistant":
+    st.title("🤖 Assistant")
+    st.caption("Чат идёт через n8n → OpenAI.")
+
+    # ---------- helpers ----------
+    def _get_n8n_urls_and_headers():
+        url = (st.secrets.get("N8N_CHAT_URL") if hasattr(st, "secrets") else None) or os.getenv("N8N_CHAT_URL")
+        if not url:
+            st.error("Не задан N8N_CHAT_URL в Secrets / ENV.")
+            st.stop()
+        headers = {"Content-Type": "application/json"}
+        token = (st.secrets.get("N8N_TOKEN") if hasattr(st, "secrets") else None) or os.getenv("N8N_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return url, headers
+
+    def _text_from_answer(resp):
+        """Берём удобочитаемый текст из ответа n8n."""
+        ans = resp.get("answer", resp) if isinstance(resp, dict) else resp
+        if isinstance(ans, dict):
+            return ans.get("content") or ans.get("text") or json.dumps(ans, ensure_ascii=False)
+        if isinstance(ans, str) and ans.strip().startswith("{"):
+            try:
+                j = json.loads(ans)
+                if isinstance(j, dict):
+                    return j.get("content") or j.get("text") or ans
+            except Exception:
+                pass
+        return str(ans)
+
+    def _files_payload(files):
+        items = []
+        if not files:
+            return items
+        for f in files:
+            raw = f.getvalue() if hasattr(f, "getvalue") else f.read()
+            if len(raw) > 8 * 1024 * 1024:  # лимит 8MB на файл
+                st.warning(f"Файл {f.name}: слишком большой (>8MB) — пропущен.")
+                continue
+            items.append({
+                "filename": f.name,
+                "mimetype": f.type or "text/csv",
+                "content_b64": base64.b64encode(raw).decode("utf-8"),
+            })
+        return items
+
+    def ask_n8n(question, history=None, user_id=None, files=None):
+        url, headers = _get_n8n_urls_and_headers()
+        payload = {
+            "question": question,
+            "history": history or [],
+            "user_id": user_id or str(uuid.uuid4()),
+            "files": files or [],
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=60)
+            ct = r.headers.get("content-type", "")
+            if not (200 <= r.status_code < 300):
+                return {"answer": f"HTTP {r.status_code}. Тело: {r.text[:500]}"}
+            if ct.startswith("application/json"):
+                try:
+                    return r.json()
+                except Exception as e:
+                    return {"answer": f"Ошибка JSON: {e}. Тело: {r.text[:500]}"}
+            return {"answer": r.text}
+        except requests.RequestException as e:
+            return {"answer": f"Network error: {e}"}
+        except Exception as e:
+            return {"answer": f"Unexpected error: {e}"}
+
+    # ---------- session ----------
+    if "chat_msgs" not in st.session_state:
+        st.session_state.chat_msgs = []
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = str(uuid.uuid4())
+
+    # ---------- история чата ----------
+    for m in st.session_state.chat_msgs:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    # ---------- uploader (по желанию) ----------
+    with st.expander("📎 Прикрепить отчёт (CSV)", expanded=False):
+        up_files = st.file_uploader(
+            "Загрузите один или несколько CSV",
+            type=["csv"], accept_multiple_files=True, key="chat_csvs"
+        )
+        send_files_now = st.button("Отправить файлы в ассистент")
+
+    # Отправка только файлов (без текста)
+    if send_files_now and up_files:
+        files_payload = _files_payload(up_files)
+        with st.chat_message("assistant"):
+            with st.spinner("Передаю файлы в n8n…"):
+                resp = ask_n8n(
+                    question="FILES_ONLY",
+                    history=st.session_state.chat_msgs,
+                    user_id=st.session_state.user_id,
+                    files=files_payload,
+                )
+                answer_text = _text_from_answer(resp)
+                st.markdown(answer_text)
+        st.session_state.chat_msgs.append({"role": "assistant", "content": answer_text})
+
+    # ---------- поле ввода ----------
+    user_text = st.chat_input("Напишите вопрос…")
+    if user_text:
+        # пользователь
+        st.session_state.chat_msgs.append({"role": "user", "content": user_text})
+        with st.chat_message("user"):
+            st.markdown(user_text)
+
+        # ассистент (текст + возможные прикреплённые файлы)
+        files_payload = _files_payload(up_files) if up_files else []
+        with st.chat_message("assistant"):
+            with st.spinner("Думаю…"):
+                resp = ask_n8n(
+                    question=user_text,
+                    history=st.session_state.chat_msgs,
+                    user_id=st.session_state.user_id,
+                    files=files_payload,
+                )
+                answer_text = _text_from_answer(resp)
+                st.markdown(answer_text)
+        st.session_state.chat_msgs.append({"role": "assistant", "content": answer_text})
+
+    # ---------- очистка ----------
+    col_clear, _ = st.columns([1, 8])
+    with col_clear:
+        if st.button("Очистить диалог"):
+            st.session_state.chat_msgs = []
+            st.rerun()
