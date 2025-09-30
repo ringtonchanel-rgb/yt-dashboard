@@ -503,42 +503,84 @@ else:
     # --- session & UI
 def render_chat_page():
     st.title("🤖 Assistant")
-    st.caption("Чат идёт через n8n → OpenAI (Message a model).")
+    st.caption("Чат идёт через n8n → OpenAI.")
 
-    # Инициализируем историю
+    # история чата в сессии
     if "chat_msgs" not in st.session_state:
         st.session_state.chat_msgs = []
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = str(uuid.uuid4())
 
-    # Рисуем накопленные сообщения
+    # показываем историю
     for m in st.session_state.chat_msgs:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
-    # Поле ввода
+    # поле ввода — ВОТ ОНО!
     user_text = st.chat_input("Напишите вопрос…")
     if user_text:
-        # 1) локально отрисуем пользователя
+        # добавить пользователя в историю и отрисовать
         st.session_state.chat_msgs.append({"role": "user", "content": user_text})
         with st.chat_message("user"):
             st.markdown(user_text)
 
-        # 2) вызовем n8n
+        # запрос в n8n
         with st.chat_message("assistant"):
             with st.spinner("Думаю…"):
-                n8n_resp = ask_n8n(
+                resp = ask_n8n(
                     question=user_text,
                     history=st.session_state.chat_msgs,
-                    user_id=st.session_state.get("user_id") or str(uuid.uuid4()),
+                    user_id=st.session_state.user_id,
                 )
-                answer = n8n_resp.get("answer", "Пустой ответ 🤖")
+                answer = resp.get("answer", "Пустой ответ 🤖")
                 st.markdown(answer)
 
-        # 3) докинем ассистента в историю
+        # добавить ответ ассистента в историю
         st.session_state.chat_msgs.append({"role": "assistant", "content": answer})
 
-    # Кнопка сброса чата
-    cols = st.columns([1, 1, 6])
-    with cols[0]:
+    # кнопка очистки
+    c_clear, _ = st.columns([1, 8])
+    with c_clear:
         if st.button("Очистить диалог"):
             st.session_state.chat_msgs = []
             st.rerun()
+            if nav == "🤖 Assistant":
+    render_chat_page()
+def _get_n8n_urls_and_headers():
+    """
+    Берём URL из Secrets / ENV и готовим заголовки.
+    """
+    n8n_url = st.secrets.get("N8N_CHAT_URL") or os.getenv("N8N_CHAT_URL")
+    headers = {"Content-Type": "application/json"}
+    token = st.secrets.get("N8N_TOKEN") or os.getenv("N8N_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return n8n_url, headers
+
+def ask_n8n(question: str, history: list[dict] | None = None, user_id: str | None = None) -> dict:
+    """
+    POST → твой n8n вебхук. Ожидаемый ответ:
+      {"answer": "...", ...}
+    """
+    n8n_url, headers = _get_n8n_urls_and_headers()
+    if not n8n_url:
+        return {"answer": "N8N_CHAT_URL не задан в Secrets / ENV."}
+
+    payload = {
+        "question": question,
+        "history": history or [],
+        "user_id": user_id or str(uuid.uuid4()),
+    }
+    try:
+        resp = requests.post(n8n_url, json=payload, headers=headers, timeout=60)
+        resp.raise_for_status()
+        if resp.headers.get("content-type", "").startswith("application/json"):
+            return resp.json()
+        return {"answer": resp.text}
+    except requests.HTTPError as e:
+        return {"answer": f"HTTP error: {e} — {getattr(e.response, 'text', '')}"}
+    except requests.RequestException as e:
+        return {"answer": f"Network error: {e}"}
+    except Exception as e:
+        return {"answer": f"Unexpected error: {e}"}
+        
