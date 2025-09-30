@@ -500,7 +500,7 @@ else:
             return {"answer": f"Unexpected error: {e}"}
 
     # --- session & UI
-   def render_chat_page():
+def render_chat_page():
     st.title("🤖 Assistant")
     st.caption("Чат идёт через n8n → OpenAI (Message a model).")
 
