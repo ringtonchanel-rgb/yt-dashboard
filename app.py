@@ -1,12 +1,20 @@
-# app.py — YouTube Analytics Tools
-# Dashboard (группы + сохранение изменений) и Group Analytics (Year Mix)
-# Дубликаты CSV РАЗРЕШЕНЫ: можно добавлять один и тот же файл сколько угодно раз.
+# app.py — YouTube Analytics Tools + n8n Assistant (исправлено)
+# -------------------------------------------------------------
+# Secrets:
+#   N8N_CHAT_URL = "https://<your-n8n>.n8n.cloud/webhook/streamlit-chat"
+#   (опц.) N8N_TOKEN = "<bearer-token>"
 
-import streamlit as st
-import pandas as pd
+import io
+import re
+import os
+import uuid
+import json
+import hashlib
+import requests
 import numpy as np
+import pandas as pd
 import plotly.express as px
-import io, re, hashlib
+import streamlit as st
 
 # --------------------------- UI CONFIG ---------------------------
 st.set_page_config(page_title="YouTube Analytics Tools", layout="wide")
@@ -20,7 +28,10 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 st.sidebar.divider()
-nav = st.sidebar.radio("Навигация", [f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics"])
+nav = st.sidebar.radio(
+    "Навигация",
+    [f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics", "🤖 Assistant"],
+)
 st.sidebar.divider()
 
 # --------------------------- HELPERS: columns / parsing ---------------------------
@@ -109,14 +120,9 @@ def seconds_to_hhmmss(sec):
 
 # --------------------------- FILE LOADER ---------------------------
 def load_uploaded_file(uploaded_file):
-    """
-    Читаем файл стабильно:
-    - единым байтовым буфером (getvalue/read)
-    - md5-хэш (теперь лишь для информации, дубли разрешены)
-    - пробы кодировок
-    """
+    """Стабильное чтение CSV (байтовый буфер + проба кодировок). Дубликаты разрешены."""
     raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
-    h = hashlib.md5(raw).hexdigest()
+    _ = hashlib.md5(raw).hexdigest()  # хэш — инфо (не используем для дедупа)
 
     df = None
     for enc in (None, "utf-8-sig", "cp1251"):
@@ -130,11 +136,11 @@ def load_uploaded_file(uploaded_file):
     if df is not None and not df.empty:
         df.columns = [c.strip() for c in df.columns]
         meta = f"✅ {uploaded_file.name}: {df.shape[0]} строк, {df.shape[1]} колонок."
-    return {"name": uploaded_file.name, "hash": h, "df": df, "meta": meta}
+    return {"name": uploaded_file.name, "df": df, "meta": meta}
 
 # --------------------------- STORAGE ---------------------------
 if "groups" not in st.session_state:
-    st.session_state["groups"] = []   # [{name: str, files: [{name, hash, df, meta}, ...]}]
+    st.session_state["groups"] = []   # [{name: str, files: [{name, df, meta}, ...]}]
 
 def concat_groups(indices):
     frames = []
@@ -186,8 +192,7 @@ if nav.endswith("Dashboard"):
                     pack = load_uploaded_file(uf)
                     if pack["df"] is None or pack["df"].empty:
                         continue
-                    # Дубликаты РАЗРЕШЕНЫ — просто добавляем всё
-                    new_files.append(pack)
+                    new_files.append(pack)  # Дубликаты РАЗРЕШЕНЫ
                 if new_files:
                     st.session_state["groups"].append({"name": group_name.strip(), "files": new_files})
                     st.success(f"Группа добавлена. Загружено файлов: {len(new_files)}.")
@@ -198,45 +203,36 @@ if nav.endswith("Dashboard"):
     if not st.session_state["groups"]:
         st.info("Добавьте хотя бы одну группу в сайдбаре.")
     else:
-        # --- Управление группами
         st.markdown("### Управление группами")
         for gi, g in enumerate(st.session_state["groups"]):
             with st.expander(f"Группа: {g['name']}", expanded=False):
-                # Поля редактирования
                 new_name = st.text_input("Название", value=g["name"], key=f"rename_{gi}")
                 add_more = st.file_uploader(
                     "Добавить отчёты в эту группу",
                     type=["csv"], accept_multiple_files=True, key=f"append_files_{gi}"
                 )
 
-                # ЕДИНАЯ КНОПКА СОХРАНЕНИЯ
                 if st.button("Сохранить изменения", key=f"save_group_{gi}"):
                     changed = False
-
-                    # Переименование
                     if new_name.strip() and new_name.strip() != g["name"]:
                         g["name"] = new_name.strip()
                         changed = True
-
-                    # Добавление файлов (дубликаты разрешены)
                     if add_more:
                         added = 0
                         for uf in add_more:
                             pack = load_uploaded_file(uf)
                             if pack["df"] is None or pack["df"].empty:
                                 continue
-                            g["files"].append(pack)
+                            g["files"].append(pack)  # дубликаты можно
                             added += 1
                         if added:
                             st.success(f"Добавлено файлов: {added}.")
                             changed = True
-
                     if changed:
                         st.rerun()
                     else:
                         st.info("Изменений нет — нечего сохранять.")
 
-                # Список файлов + удаление
                 st.markdown("**Файлы группы:**")
                 if not g["files"]:
                     st.write("— пока нет файлов.")
@@ -251,17 +247,14 @@ if nav.endswith("Dashboard"):
                                 st.rerun()
 
                 st.divider()
-                # Удаление группы
                 if st.button("Удалить группу", key=f"del_group_{gi}"):
                     st.session_state["groups"].pop(gi)
                     st.rerun()
 
         st.divider()
-
-        # --- KPI по группам
         st.markdown("### Сводка по группам")
         kpi_rows = []
-        for gi, g in enumerate(st.session_state["groups"]):
+        for g in st.session_state["groups"]:
             kp = kpis_for_group(g)
             st.subheader(f"Группа: {g['name']}")
             c1, c2, c3, c4 = st.columns(4)
@@ -284,7 +277,7 @@ if nav.endswith("Dashboard"):
             st.dataframe(comp_df, use_container_width=True, hide_index=True)
 
 # --------------------------- GROUP ANALYTICS ---------------------------
-else:
+elif nav.endswith("Group Analytics"):
     st.header("Group Analytics")
     tool = st.sidebar.selectbox("Выберите инструмент анализа", ["Сравнение по годам (Year Mix)"])
 
@@ -319,7 +312,6 @@ else:
                 st.stop()
             df = pd.concat(df_list, ignore_index=True)
 
-            # Сохранение в группу при желании (без дедупа)
             if st.sidebar.checkbox("Сохранить эти файлы в группу"):
                 mode = st.sidebar.radio("Куда сохранить", ["В существующую группу", "Создать новую"])
                 if mode == "В существующую группу":
@@ -469,149 +461,43 @@ else:
 
         for s in parts:
             st.markdown("• " + s)
-            # ---------- Чат с n8n ----------
-import os, requests, json
-import streamlit as st
 
-N8N_CHAT_URL = os.environ.get("N8N_CHAT_URL")  # ты уже сохранил секрет в App settings → Secrets
-
-st.divider()
-st.subheader("🤖 Chat (n8n webhook)")
-
-if not N8N_CHAT_URL:
-    st.warning("Секрет N8N_CHAT_URL не задан. Задай его в App settings → Secrets и перезапусти приложение.")
+# --------------------------- 🤖 ASSISTANT (n8n chat) ---------------------------
 else:
-    # Память чата в сессии
-    if "chat" not in st.session_state:
-        st.session_state.chat = []  # список кортежей: ("user"/"bot", text)
-
-    # Рисуем историю
-    for role, text in st.session_state.chat:
-        st.chat_message("user" if role == "user" else "assistant").write(text)
-
-    # Ввод нового сообщения
-    prompt = st.chat_input("Напишите вопрос…")
-    if prompt:
-        st.session_state.chat.append(("user", prompt))
-        with st.chat_message("assistant"):
-            with st.spinner("Отправляю в n8n…"):
-                try:
-                    payload = {"prompt": prompt, "meta": {"source": "streamlit", "user": "anon"}}
-                    r = requests.post(N8N_CHAT_URL, json=payload, timeout=30)
-                    r.raise_for_status()
-                    # пробуем JSON, иначе текст
-                    if r.headers.get("content-type", "").startswith("application/json"):
-                        data = r.json()
-                        answer = data.get("answer", json.dumps(data, ensure_ascii=False))
-                    else:
-                        answer = r.text
-                except Exception as e:
-                    answer = f"Ошибка запроса: {e}"
-            st.write(answer)
-        st.session_state.chat.append(("bot", answer))
-
-
-# === 1) ДОБАВЬ / ПРОВЕРЬ ИМПОРТЫ ВВЕРХУ ФАЙЛА ===
-import os
-import uuid
-import requests
-
-# === 2) ДОБАВЬ ПОСЛЕ СВОЕЙ НАВИГАЦИИ В SIDEBAR ===
-# Было, например:
-# nav = st.sidebar.radio("Навигация", [f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics"])
-# Заменяем на:
-nav = st.sidebar.radio(
-    "Навигация",
-    [f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics", "🤖 Assistant"]
-)
-
-# === 3) ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ЧАТА ===
-def _get_n8n_urls_and_headers():
-    """
-    Берём URL из секрета или env и готовим заголовки.
-    Если в n8n включена авторизация по Bearer токену — тоже подставим.
-    """
-    n8n_url = st.secrets.get("N8N_CHAT_URL") or os.getenv("N8N_CHAT_URL")
-    if not n8n_url:
-        st.error("Не задан N8N_CHAT_URL в Secrets / переменных окружения.")
-        st.stop()
-
-    headers = {"Content-Type": "application/json"}
-    token = st.secrets.get("N8N_TOKEN") or os.getenv("N8N_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return n8n_url, headers
-
-def ask_n8n(question: str, history: list[dict] | None = None, user_id: str | None = None) -> dict:
-    """
-    Делает POST в твой n8n вебхук и возвращает JSON-ответ.
-    Ожидается, что твой n8n workflow возвращает, например:
-      { "answer": "текст ответа", "meta": { ... } }
-    """
-    n8n_url, headers = _get_n8n_urls_and_headers()
-
-    payload = {
-        "question": question,
-        "history": history or [],  # можно пробросить историю, если используешь её в n8n
-        "user_id": user_id or str(uuid.uuid4()),
-        # можно добавить любые кастомные поля, которые ждёт твой Prepare node
-    }
-
-    try:
-        resp = requests.post(n8n_url, json=payload, headers=headers, timeout=60)
-        resp.raise_for_status()
-        return resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"answer": resp.text}
-    except requests.HTTPError as e:
-        return {"answer": f"HTTP error: {e} — {getattr(e.response, 'text', '')}"}
-    except requests.RequestException as e:
-        return {"answer": f"Network error: {e}"}
-    except Exception as e:
-        return {"answer": f"Unexpected error: {e}"}
-
-def render_chat_page():
     st.title("🤖 Assistant")
-    st.caption("Чат идёт через n8n → OpenAI (Message a model).")
+    st.caption("Чат идёт через n8n → OpenAI.")
 
-    # Инициализируем историю
-    if "chat_msgs" not in st.session_state:
-        st.session_state.chat_msgs = []
+    # --- helpers
+    def _get_n8n():
+        url = (st.secrets.get("N8N_CHAT_URL") if hasattr(st, "secrets") else None) or os.getenv("N8N_CHAT_URL")
+        if not url:
+            st.error("Не задан N8N_CHAT_URL в Secrets / переменных окружения.")
+            st.stop()
+        headers = {"Content-Type": "application/json"}
+        token = (st.secrets.get("N8N_TOKEN") if hasattr(st, "secrets") else None) or os.getenv("N8N_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return url, headers
 
-    # Рисуем накопленные сообщения
-    for m in st.session_state.chat_msgs:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+    def ask_n8n(question: str, history: list[dict] | None = None, user_id: str | None = None) -> dict:
+        url, headers = _get_n8n()
+        payload = {
+            "question": question,
+            "history": history or [],
+            "user_id": user_id or str(uuid.uuid4()),
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=60)
+            r.raise_for_status()
+            if r.headers.get("content-type","").startswith("application/json"):
+                return r.json()
+            return {"answer": r.text}
+        except requests.HTTPError as e:
+            return {"answer": f"HTTP error: {e} — {getattr(e.response,'text','')}"}
+        except requests.RequestException as e:
+            return {"answer": f"Network error: {e}"}
+        except Exception as e:
+            return {"answer": f"Unexpected error: {e}"}
 
-    # Поле ввода
-    user_text = st.chat_input("Напишите вопрос…")
-    if user_text:
-        # 1) локально отрисуем пользователя
-        st.session_state.chat_msgs.append({"role": "user", "content": user_text})
-        with st.chat_message("user"):
-            st.markdown(user_text)
-
-        # 2) вызовем n8n
-        with st.chat_message("assistant"):
-            with st.spinner("Думаю…"):
-                # Если в n8n ты используешь историю – можно передать её целиком
-                # (или сжать до нужного формата внутри Prepare Messages)
-                n8n_resp = ask_n8n(
-                    question=user_text,
-                    history=st.session_state.chat_msgs,  # можно заменить на [] если история не нужна
-                    user_id=st.session_state.get("user_id") or str(uuid.uuid4()),
-                )
-                answer = n8n_resp.get("answer", "Пустой ответ 🤖")
-                st.markdown(answer)
-
-        # 3) докинем ассистента в историю
-        st.session_state.chat_msgs.append({"role": "assistant", "content": answer})
-
-        # Кнопка сброса сессии чата (по желанию)
-    cols = st.columns([1,1,6])
-    with cols[0]:
-        if st.button("Очистить диалог"):
-            st.session_state.chat_msgs = []
-            st.rerun()
-
-# === 4) ВЕТКА РЕНДЕРА ЧАТА ===
-if nav == "🤖 Assistant":
-    render_chat_page()
+    # --- session & UI
+    if "chat_msgs" not in
