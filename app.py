@@ -1,4 +1,4 @@
-# app.py — YouTube Analytics Tools + n8n Assistant (исправлено и упрощено)
+# app.py — YouTube Analytics Tools + n8n Assistant (чистая версия)
 
 import io
 import re
@@ -7,9 +7,6 @@ import uuid
 import hashlib
 import base64
 import json
-import requests
-import uuid
-import os
 import requests
 import numpy as np
 import pandas as pd
@@ -29,7 +26,7 @@ st.sidebar.markdown(
 )
 st.sidebar.divider()
 
-# ВАЖНО: nav создаём ОДИН раз
+# nav создаём ОДИН раз
 nav = st.sidebar.radio(
     "Навигация",
     [f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics", "🤖 Assistant"],
@@ -174,74 +171,6 @@ def kpis_for_group(group):
     avg_ctr = float(np.nanmean(ctr_vals)) if ctr_vals else np.nan
     avg_avd = float(np.nanmean(avd_vals)) if avd_vals else np.nan
     return dict(impressions=int(total_impr), views=int(total_views), ctr=avg_ctr, avd_sec=avg_avd)
-
-# ============================ n8n CHAT ============================
-def _get_n8n_urls_and_headers():
-    """Берём URL из Secrets / ENV и готовим заголовки."""
-    n8n_url = (st.secrets.get("N8N_CHAT_URL") if hasattr(st, "secrets") else None) or os.getenv("N8N_CHAT_URL")
-    headers = {"Content-Type": "application/json"}
-    token = (st.secrets.get("N8N_TOKEN") if hasattr(st, "secrets") else None) or os.getenv("N8N_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return n8n_url, headers
-
-def ask_n8n(question: str, history: list[dict] | None = None, user_id: str | None = None) -> dict:
-    """POST → твой n8n webhook. Ожидаемый ответ: {'answer': '...'}"""
-    n8n_url, headers = _get_n8n_urls_and_headers()
-    if not n8n_url:
-        return {"answer": "N8N_CHAT_URL не задан в Secrets / ENV."}
-    payload = {"question": question, "history": history or [], "user_id": user_id or str(uuid.uuid4())}
-    try:
-        resp = requests.post(n8n_url, json=payload, headers=headers, timeout=60)
-        resp.raise_for_status()
-        if resp.headers.get("content-type", "").startswith("application/json"):
-            return resp.json()
-        return {"answer": resp.text}
-    except requests.HTTPError as e:
-        return {"answer": f"HTTP error: {e} — {getattr(e.response, 'text', '')}"}
-    except requests.RequestException as e:
-        return {"answer": f"Network error: {e}"}
-    except Exception as e:
-        return {"answer": f"Unexpected error: {e}"}
-
-def render_chat_page():
-    st.title("🤖 Assistant")
-    st.caption("Чат идёт через n8n → OpenAI.")
-
-    if "chat_msgs" not in st.session_state:
-        st.session_state.chat_msgs = []
-    if "user_id" not in st.session_state:
-        st.session_state.user_id = str(uuid.uuid4())
-
-    # история
-    for m in st.session_state.chat_msgs:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
-
-    # ввод
-    user_text = st.chat_input("Напишите вопрос…")
-    if user_text:
-        st.session_state.chat_msgs.append({"role": "user", "content": user_text})
-        with st.chat_message("user"):
-            st.markdown(user_text)
-
-        with st.chat_message("assistant"):
-            with st.spinner("Думаю…"):
-                resp = ask_n8n(
-                    question=user_text,
-                    history=st.session_state.chat_msgs,
-                    user_id=st.session_state.user_id,
-                )
-                answer = resp.get("answer", "Пустой ответ 🤖")
-                st.markdown(answer)
-        st.session_state.chat_msgs.append({"role": "assistant", "content": answer})
-
-    # очистка
-    col_clear, _ = st.columns([1, 8])
-    with col_clear:
-        if st.button("Очистить диалог"):
-            st.session_state.chat_msgs = []
-            st.rerun()
 
 # ============================== PAGES ==============================
 if nav.endswith("Dashboard"):
@@ -531,10 +460,7 @@ elif nav.endswith("Group Analytics"):
             st.markdown("• " + s)
 
 elif nav == "🤖 Assistant":
-    render_chat_page()
-
-# --------------------------- 🤖 ASSISTANT (n8n chat) ---------------------------
-elif nav == "🤖 Assistant":
+    # --------------------------- 🤖 ASSISTANT (n8n chat) ---------------------------
     st.title("🤖 Assistant")
     st.caption("Чат идёт через n8n → OpenAI.")
 
