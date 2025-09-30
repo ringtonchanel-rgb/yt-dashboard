@@ -30,7 +30,8 @@ st.sidebar.markdown(
 st.sidebar.divider()
 nav = st.sidebar.radio(
     "Навигация",
-    [f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics", "🤖 Assistant"],
+    ["📊 Dashboard", "🧩 Group Analytics", "🤖 Assistant"],
+    index=0
 )
 st.sidebar.divider()
 
