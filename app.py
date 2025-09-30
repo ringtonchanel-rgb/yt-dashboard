@@ -500,4 +500,44 @@ else:
             return {"answer": f"Unexpected error: {e}"}
 
     # --- session & UI
-    if "chat_msgs" not in
+   def render_chat_page():
+    st.title("🤖 Assistant")
+    st.caption("Чат идёт через n8n → OpenAI (Message a model).")
+
+    # Инициализируем историю
+    if "chat_msgs" not in st.session_state:
+        st.session_state.chat_msgs = []
+
+    # Рисуем накопленные сообщения
+    for m in st.session_state.chat_msgs:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    # Поле ввода
+    user_text = st.chat_input("Напишите вопрос…")
+    if user_text:
+        # 1) локально отрисуем пользователя
+        st.session_state.chat_msgs.append({"role": "user", "content": user_text})
+        with st.chat_message("user"):
+            st.markdown(user_text)
+
+        # 2) вызовем n8n
+        with st.chat_message("assistant"):
+            with st.spinner("Думаю…"):
+                n8n_resp = ask_n8n(
+                    question=user_text,
+                    history=st.session_state.chat_msgs,
+                    user_id=st.session_state.get("user_id") or str(uuid.uuid4()),
+                )
+                answer = n8n_resp.get("answer", "Пустой ответ 🤖")
+                st.markdown(answer)
+
+        # 3) докинем ассистента в историю
+        st.session_state.chat_msgs.append({"role": "assistant", "content": answer})
+
+    # Кнопка сброса чата
+    cols = st.columns([1, 1, 6])
+    with cols[0]:
+        if st.button("Очистить диалог"):
+            st.session_state.chat_msgs = []
+            st.rerun()
