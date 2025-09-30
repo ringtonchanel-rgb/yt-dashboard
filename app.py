@@ -1,14 +1,9 @@
-# app.py — YouTube Analytics Tools + n8n Assistant (исправлено)
-# -------------------------------------------------------------
-# Secrets:
-#   N8N_CHAT_URL = "https://<your-n8n>.n8n.cloud/webhook/streamlit-chat"
-#   (опц.) N8N_TOKEN = "<bearer-token>"
+# app.py — YouTube Analytics Tools + n8n Assistant (исправлено и упрощено)
 
 import io
 import re
 import os
 import uuid
-import json
 import hashlib
 import requests
 import numpy as np
@@ -16,7 +11,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# --------------------------- UI CONFIG ---------------------------
+# =========================== UI / NAV ===========================
 st.set_page_config(page_title="YouTube Analytics Tools", layout="wide")
 USE_EMOJI = True
 ICON_DASH  = "📊 " if USE_EMOJI else ""
@@ -28,14 +23,16 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 st.sidebar.divider()
+
+# ВАЖНО: nav создаём ОДИН раз
 nav = st.sidebar.radio(
     "Навигация",
-    ["📊 Dashboard", "🧩 Group Analytics", "🤖 Assistant"],
+    [f"{ICON_DASH}Dashboard", f"{ICON_GROUP}Group Analytics", "🤖 Assistant"],
     index=0
 )
 st.sidebar.divider()
 
-# --------------------------- HELPERS: columns / parsing ---------------------------
+# ===================== HELPERS: columns / parsing =====================
 def _norm(s: str) -> str:
     return str(s).strip().lower()
 
@@ -79,8 +76,7 @@ def to_number(x):
     if s == "" or s.lower() in {"nan", "none"}:
         return np.nan
     s = s.replace(" ", "").replace("\u202f", "").replace("\xa0", "")
-    is_percent = s.endswith("%")
-    if is_percent:
+    if s.endswith("%"):
         s = s[:-1]
     if "," in s and "." not in s:
         s = s.replace(",", ".")
@@ -119,11 +115,11 @@ def seconds_to_hhmmss(sec):
     s = sec % 60
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-# --------------------------- FILE LOADER ---------------------------
+# =========================== FILE LOADER ===========================
 def load_uploaded_file(uploaded_file):
     """Стабильное чтение CSV (байтовый буфер + проба кодировок). Дубликаты разрешены."""
     raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
-    _ = hashlib.md5(raw).hexdigest()  # хэш — инфо (не используем для дедупа)
+    _ = hashlib.md5(raw).hexdigest()  # инфо-хэш (для нас не критичен)
 
     df = None
     for enc in (None, "utf-8-sig", "cp1251"):
@@ -139,7 +135,7 @@ def load_uploaded_file(uploaded_file):
         meta = f"✅ {uploaded_file.name}: {df.shape[0]} строк, {df.shape[1]} колонок."
     return {"name": uploaded_file.name, "df": df, "meta": meta}
 
-# --------------------------- STORAGE ---------------------------
+# ============================ STORAGE ============================
 if "groups" not in st.session_state:
     st.session_state["groups"] = []   # [{name: str, files: [{name, df, meta}, ...]}]
 
@@ -174,11 +170,79 @@ def kpis_for_group(group):
     avg_avd = float(np.nanmean(avd_vals)) if avd_vals else np.nan
     return dict(impressions=int(total_impr), views=int(total_views), ctr=avg_ctr, avd_sec=avg_avd)
 
-# --------------------------- DASHBOARD ---------------------------
+# ============================ n8n CHAT ============================
+def _get_n8n_urls_and_headers():
+    """Берём URL из Secrets / ENV и готовим заголовки."""
+    n8n_url = (st.secrets.get("N8N_CHAT_URL") if hasattr(st, "secrets") else None) or os.getenv("N8N_CHAT_URL")
+    headers = {"Content-Type": "application/json"}
+    token = (st.secrets.get("N8N_TOKEN") if hasattr(st, "secrets") else None) or os.getenv("N8N_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return n8n_url, headers
+
+def ask_n8n(question: str, history: list[dict] | None = None, user_id: str | None = None) -> dict:
+    """POST → твой n8n webhook. Ожидаемый ответ: {'answer': '...'}"""
+    n8n_url, headers = _get_n8n_urls_and_headers()
+    if not n8n_url:
+        return {"answer": "N8N_CHAT_URL не задан в Secrets / ENV."}
+    payload = {"question": question, "history": history or [], "user_id": user_id or str(uuid.uuid4())}
+    try:
+        resp = requests.post(n8n_url, json=payload, headers=headers, timeout=60)
+        resp.raise_for_status()
+        if resp.headers.get("content-type", "").startswith("application/json"):
+            return resp.json()
+        return {"answer": resp.text}
+    except requests.HTTPError as e:
+        return {"answer": f"HTTP error: {e} — {getattr(e.response, 'text', '')}"}
+    except requests.RequestException as e:
+        return {"answer": f"Network error: {e}"}
+    except Exception as e:
+        return {"answer": f"Unexpected error: {e}"}
+
+def render_chat_page():
+    st.title("🤖 Assistant")
+    st.caption("Чат идёт через n8n → OpenAI.")
+
+    if "chat_msgs" not in st.session_state:
+        st.session_state.chat_msgs = []
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = str(uuid.uuid4())
+
+    # история
+    for m in st.session_state.chat_msgs:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    # ввод
+    user_text = st.chat_input("Напишите вопрос…")
+    if user_text:
+        st.session_state.chat_msgs.append({"role": "user", "content": user_text})
+        with st.chat_message("user"):
+            st.markdown(user_text)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Думаю…"):
+                resp = ask_n8n(
+                    question=user_text,
+                    history=st.session_state.chat_msgs,
+                    user_id=st.session_state.user_id,
+                )
+                answer = resp.get("answer", "Пустой ответ 🤖")
+                st.markdown(answer)
+        st.session_state.chat_msgs.append({"role": "assistant", "content": answer})
+
+    # очистка
+    col_clear, _ = st.columns([1, 8])
+    with col_clear:
+        if st.button("Очистить диалог"):
+            st.session_state.chat_msgs = []
+            st.rerun()
+
+# ============================== PAGES ==============================
 if nav.endswith("Dashboard"):
     st.header("Dashboard")
 
-    # --- Добавить новую группу
+    # Добавить новую группу
     with st.sidebar.expander("➕ Добавить группу данных", expanded=True):
         group_name = st.text_input("Название группы (канала)", value=f"Group {len(st.session_state['groups'])+1}")
         files = st.file_uploader("Загрузите один или несколько CSV", type=["csv"], accept_multiple_files=True, key="add_group_files")
@@ -193,13 +257,13 @@ if nav.endswith("Dashboard"):
                     pack = load_uploaded_file(uf)
                     if pack["df"] is None or pack["df"].empty:
                         continue
-                    new_files.append(pack)  # Дубликаты РАЗРЕШЕНЫ
+                    new_files.append(pack)  # дубликаты разрешены
                 if new_files:
                     st.session_state["groups"].append({"name": group_name.strip(), "files": new_files})
                     st.success(f"Группа добавлена. Загружено файлов: {len(new_files)}.")
                     st.rerun()
                 else:
-                    st.error("Не удалось добавить файлы (возможно пустые/повреждены).")
+                    st.error("Не удалось добавить файлы (пустые/повреждены).")
 
     if not st.session_state["groups"]:
         st.info("Добавьте хотя бы одну группу в сайдбаре.")
@@ -277,7 +341,6 @@ if nav.endswith("Dashboard"):
             comp_df = pd.DataFrame(kpi_rows)
             st.dataframe(comp_df, use_container_width=True, hide_index=True)
 
-# --------------------------- GROUP ANALYTICS ---------------------------
 elif nav.endswith("Group Analytics"):
     st.header("Group Analytics")
     tool = st.sidebar.selectbox("Выберите инструмент анализа", ["Сравнение по годам (Year Mix)"])
@@ -459,128 +522,8 @@ elif nav.endswith("Group Analytics"):
                 parts.append(
                     f"При близких просмотрах у {prev_year} и {ref_year} в {ref_year}-м понадобилось больше видео (≈×{times:.1f})."
                 )
-
         for s in parts:
             st.markdown("• " + s)
 
-# --------------------------- 🤖 ASSISTANT (n8n chat) ---------------------------
-else:
-    st.title("🤖 Assistant")
-    st.caption("Чат идёт через n8n → OpenAI.")
-
-    # --- helpers
-    def _get_n8n():
-        url = (st.secrets.get("N8N_CHAT_URL") if hasattr(st, "secrets") else None) or os.getenv("N8N_CHAT_URL")
-        if not url:
-            st.error("Не задан N8N_CHAT_URL в Secrets / переменных окружения.")
-            st.stop()
-        headers = {"Content-Type": "application/json"}
-        token = (st.secrets.get("N8N_TOKEN") if hasattr(st, "secrets") else None) or os.getenv("N8N_TOKEN")
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        return url, headers
-
-    def ask_n8n(question: str, history: list[dict] | None = None, user_id: str | None = None) -> dict:
-        url, headers = _get_n8n()
-        payload = {
-            "question": question,
-            "history": history or [],
-            "user_id": user_id or str(uuid.uuid4()),
-        }
-        try:
-            r = requests.post(url, json=payload, headers=headers, timeout=60)
-            r.raise_for_status()
-            if r.headers.get("content-type","").startswith("application/json"):
-                return r.json()
-            return {"answer": r.text}
-        except requests.HTTPError as e:
-            return {"answer": f"HTTP error: {e} — {getattr(e.response,'text','')}"}
-        except requests.RequestException as e:
-            return {"answer": f"Network error: {e}"}
-        except Exception as e:
-            return {"answer": f"Unexpected error: {e}"}
-
-    # --- session & UI
-def render_chat_page():
-    st.title("🤖 Assistant")
-    st.caption("Чат идёт через n8n → OpenAI.")
-
-    # история чата в сессии
-    if "chat_msgs" not in st.session_state:
-        st.session_state.chat_msgs = []
-    if "user_id" not in st.session_state:
-        st.session_state.user_id = str(uuid.uuid4())
-
-    # показываем историю
-    for m in st.session_state.chat_msgs:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
-
-    # поле ввода — ВОТ ОНО!
-    user_text = st.chat_input("Напишите вопрос…")
-    if user_text:
-        # добавить пользователя в историю и отрисовать
-        st.session_state.chat_msgs.append({"role": "user", "content": user_text})
-        with st.chat_message("user"):
-            st.markdown(user_text)
-
-        # запрос в n8n
-        with st.chat_message("assistant"):
-            with st.spinner("Думаю…"):
-                resp = ask_n8n(
-                    question=user_text,
-                    history=st.session_state.chat_msgs,
-                    user_id=st.session_state.user_id,
-                )
-                answer = resp.get("answer", "Пустой ответ 🤖")
-                st.markdown(answer)
-
-        # добавить ответ ассистента в историю
-        st.session_state.chat_msgs.append({"role": "assistant", "content": answer})
-
-    # кнопка очистки
-    c_clear, _ = st.columns([1, 8])
-    with c_clear:
-        if st.button("Очистить диалог"):
-            st.session_state.chat_msgs = []
-            st.rerun()
-            if nav == "🤖 Assistant":
+elif nav == "🤖 Assistant":
     render_chat_page()
-def _get_n8n_urls_and_headers():
-    """
-    Берём URL из Secrets / ENV и готовим заголовки.
-    """
-    n8n_url = st.secrets.get("N8N_CHAT_URL") or os.getenv("N8N_CHAT_URL")
-    headers = {"Content-Type": "application/json"}
-    token = st.secrets.get("N8N_TOKEN") or os.getenv("N8N_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return n8n_url, headers
-
-def ask_n8n(question: str, history: list[dict] | None = None, user_id: str | None = None) -> dict:
-    """
-    POST → твой n8n вебхук. Ожидаемый ответ:
-      {"answer": "...", ...}
-    """
-    n8n_url, headers = _get_n8n_urls_and_headers()
-    if not n8n_url:
-        return {"answer": "N8N_CHAT_URL не задан в Secrets / ENV."}
-
-    payload = {
-        "question": question,
-        "history": history or [],
-        "user_id": user_id or str(uuid.uuid4()),
-    }
-    try:
-        resp = requests.post(n8n_url, json=payload, headers=headers, timeout=60)
-        resp.raise_for_status()
-        if resp.headers.get("content-type", "").startswith("application/json"):
-            return resp.json()
-        return {"answer": resp.text}
-    except requests.HTTPError as e:
-        return {"answer": f"HTTP error: {e} — {getattr(e.response, 'text', '')}"}
-    except requests.RequestException as e:
-        return {"answer": f"Network error: {e}"}
-    except Exception as e:
-        return {"answer": f"Unexpected error: {e}"}
-        
